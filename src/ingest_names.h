@@ -870,6 +870,7 @@ inline bool constCaptureNeedsScreamingGate( Lang lang ) noexcept
         case Lang::CSharp:
         case Lang::C:
         case Lang::Cpp:
+        case Lang::Haxe:   // queries/haxe/tags.scm binds EVERY ClassVar and module-level EVars; the gate keeps `MAX_RETRIES`, drops `count`
         {
             return true;
         }

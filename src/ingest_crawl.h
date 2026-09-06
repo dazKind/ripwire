@@ -53,11 +53,11 @@ struct LangEntry
 
 // Order does not matter (linear scan); kept grouped by language for readability.
 // The extent is EXACT, not headroom: it was 32 with 32 rows, .toml made it 33, .pyi made it 34 and the
-// .yml/.yaml pair made it 36, and the .php/.phtml/.lua trio made it 40. Sizing it to the row count is what makes
+// .yml/.yaml pair made it 36, the .php/.phtml/.lua trio made it 40, and .hx made it 41. Sizing it to the row count is what makes
 // `std::array<bool, kLangTable.size()> present` (the grammar-prewarm set,
 // below) exact too, and it turns "added a row and forgot the extent" into a compile error rather than a
 // silent drop.
-constexpr std::array<LangEntry, 40> kLangTable = {{
+constexpr std::array<LangEntry, 41> kLangTable = {{
     { ".cpp",  Lang::Cpp,        &tree_sitter_cpp,        "cpp"        },
     { ".cc",   Lang::Cpp,        &tree_sitter_cpp,        "cpp"        },
     { ".cxx",  Lang::Cpp,        &tree_sitter_cpp,        "cpp"        },
@@ -148,6 +148,12 @@ constexpr std::array<LangEntry, 40> kLangTable = {{
     // Lua: no classes, no imports. The five function-definition spellings and the one call node are the
     // whole extractable structure (queries/lua/tags.scm states the metatable/dynamic-dispatch floor).
     { ".lua",  Lang::Lua,        &tree_sitter_lua,        "lua"        },   // Lua — function/method defs (5 shapes) + calls
+    // Haxe: tong/tree-sitter-haxe (chosen by measured parse health — see CMakeLists). Classes, interfaces,
+    // enums, abstracts, typedefs, methods, module-level functions and SCREAMING constants are defs;
+    // `f()`, `o.m()`, `T.s()` and `new T()` are calls; `extends`/`implements` are inherit edges and
+    // `import`/`using` are Include records (queries/haxe/tags.scm states the floors: no HAS-A field edges,
+    // enum-abstract values and non-SCREAMING fields are not indexed, no static-extension receiver rewrite).
+    { ".hx",   Lang::Haxe,       &tree_sitter_haxe,       "haxe"       },   // Haxe — types/methods/functions + calls + extends/implements + import/using
     { ".md",   Lang::Markdown,   &tree_sitter_markdown,   ""           },   // Markdown DOC tier — headings/sections via extractMarkdown()'s custom tree walk; NO tags.scm (query stays "")
     { ".markdown", Lang::Markdown, &tree_sitter_markdown, ""           },   // sibling extension, same walk — scope disclosed: .md/.markdown only
 }};

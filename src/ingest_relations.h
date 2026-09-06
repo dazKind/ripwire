@@ -269,7 +269,7 @@ void captureMacroBodyCalls( TSNode defineNode, std::uint32_t fileId, Lang lang, 
 // Capture base classes for the inheritance/Lego view: walk a class node's base clause and emit an
 // inherit RawRef per base (derived → base). startByte sits inside the class header, so the enclosing
 // attribution assigns fromSymbol = the derived class. Explicit-syntax langs: C++/TS/JS/Java/Python/Swift/
-// C#/PHP. Lua is deliberately absent and it is a DISCLOSED non-goal, not an omission: Lua inheritance IS
+// C#/PHP/Haxe. Lua is deliberately absent and it is a DISCLOSED non-goal, not an omission: Lua inheritance IS
 // `setmetatable( Derived, { __index = Base } )`, an ordinary runtime call over an ordinary table, so there
 // is no syntax to read and a Lua corpus correctly reports no inheritance edges at all.
 //
@@ -288,6 +288,12 @@ void captureMacroBodyCalls( TSNode defineNode, std::uint32_t fileId, Lang lang, 
 //               Java super_interfaces → type_list → type_identifier
 //               C# base_list → primary_constructor_base_type → (its `type` field child) — a record's
 //               base with constructor args (`record Foo(int X) : Base(X)`)
+//   FIELD   — Haxe (tong/tree-sitter-haxe) has NO clause node at all: each `extends`/`implements` TypePath is
+//               a direct FIELD child of the ClassType node, and an AbstractType's `from`/`to` TypePath (an
+//               implicit cast, NOT inheritance) sits beside them with the same node kind. The field NAME is
+//               the only discriminator, so a TypePath is admitted only under the two inheritance fields, and
+//               the emitted base is its `sub:` identifier (a module sub-type, `pkg.Mod.Sub`) when present,
+//               else its `name:` type_name — exactly one ref per TypePath, never its `pack:` head.
 // So after matching a clause we scan its children for type nodes AND recurse one level into any wrapper
 // child, collecting type nodes at both depths (Rust is a separate pass — impl Trait for T is a sibling).
 void captureBases( TSNode classNode, std::uint32_t fileId, Lang lang, std::string_view src, std::vector<RawRef>& refs )
@@ -307,6 +313,23 @@ void captureBases( TSNode classNode, std::uint32_t fileId, Lang lang, std::strin
                                 || std::strcmp( ct, "base_list" ) == 0             // C#     : Base, IBar
                                 || std::strcmp( ct, "base_clause" ) == 0           // PHP    extends Base
                                 || std::strcmp( ct, "class_interface_clause" ) == 0; // PHP  implements I, J
+        if( std::strcmp( ct, "TypePath" ) == 0 )   // Haxe — FIELD shape, see the header note
+        {
+            const char* fieldName = ts_node_field_name_for_child( classNode, i );
+            if( fieldName != nullptr && ( std::strcmp( fieldName, "extends" ) == 0 || std::strcmp( fieldName, "implements" ) == 0 ) )
+            {
+                TSNode base = ts_node_child_by_field_name( clause, "sub", 3 );
+                if( ts_node_is_null( base ) )
+                {
+                    base = ts_node_child_by_field_name( clause, "name", 4 );
+                }
+                if( !ts_node_is_null( base ) )
+                {
+                    emitBaseRef( base, fileId, lang, src, refs );
+                }
+            }
+            continue;
+        }
         if( !isClause )
         {
             continue;
@@ -885,6 +908,11 @@ inline constexpr std::array<std::string_view, 19> kRustImportContainers = {
 
 inline constexpr std::array<std::string_view, 2> kCsharpImportContainers = { "namespace_declaration", "declaration_list" };
 
+// Haxe: `#if target import sys.io.File; #end` — the compile-time conditional is an ordinary named node
+// (`conditional`, with `conditional_elseif` / `conditional_else` arms) wrapping the directives it guards,
+// exactly the shape isPreprocConditional covers for the C family; read off a real parse (test/haxefix).
+inline constexpr std::array<std::string_view, 3> kHaxeImportContainers = { "conditional", "conditional_elseif", "conditional_else" };
+
 // The FUNCTION-BODY node kinds — read off real parses, not predicted. Entering ANY one of these means
 // everything inside it is written INSIDE a function's body, so a require()/import() found there only runs
 // when and if that function runs: a real dependency (kParserVer 72's whole point — the importer tier must
@@ -957,12 +985,13 @@ inline constexpr std::array<std::string_view, 34> kJsImportContainers = {
 // language has is DATA, and a language absent from the table simply has none.
 struct LangImportContainers { Lang lang; std::span<const std::string_view> nodes; };
 
-inline constexpr std::array<LangImportContainers, 5> kImportContainersByLang = { {
+inline constexpr std::array<LangImportContainers, 6> kImportContainersByLang = { {
     { Lang::Python,     kPythonImportContainers },
     { Lang::Rust,       kRustImportContainers   },
     { Lang::CSharp,     kCsharpImportContainers },
     { Lang::TypeScript, kJsImportContainers     },
-    { Lang::JavaScript, kJsImportContainers     }
+    { Lang::JavaScript, kJsImportContainers     },
+    { Lang::Haxe,       kHaxeImportContainers   }
 } };
 
 inline bool isImportContainer( Lang lang, const char* type ) noexcept
@@ -1083,10 +1112,16 @@ DirectiveTarget directiveTargetOf( TSNode n, const char* t, std::string_view src
             }
         }
     }
-    else if(    std::strcmp( t, "import_declaration" ) == 0 )            // Go / Swift — captured but NOT precise-resolved
+    else if(    std::strcmp( t, "import_declaration" ) == 0            // Go / Swift — captured but NOT precise-resolved
+             || ( lang == Lang::Haxe && ( std::strcmp( t, "import" ) == 0 || std::strcmp( t, "using" ) == 0 ) ) )   // Haxe `import a.b.C;` / `using a.b.C;`
     {
         // Go (needs go.mod module-root) and Swift (whole-module, no path) are DEFERRED — the precise
         // resolver leaves them unresolved. Keep the best-effort target for --uses / --deps back-compat.
+        // Haxe rides the same slice: its node kinds are the bare words `import`/`using` (Lang-gated because
+        // those spellings are anonymous keyword TOKENS in other grammars), a dotted type path maps onto a
+        // file only through class-path roots (.hxml / haxelib) this tool does not read, and `using` is a
+        // static-extension import — a real module dependency, never a call rewrite. A trailing ` as X` /
+        // ` in X` alias is cut so the ABS-3 import-role name is the imported type, not the nickname.
         const uint32_t a = ts_node_start_byte( n ), b = ts_node_end_byte( n );
         if( a < b && b <= src.size() )
         {
@@ -1100,6 +1135,16 @@ DirectiveTarget directiveTargetOf( TSNode n, const char* t, std::string_view src
             while( !target.empty() && ( target.back() == ';' || target.back() == ' ' || target.back() == '\n' || target.back() == '\r' ) )
             {
                 target.pop_back();
+            }
+            if( lang == Lang::Haxe )
+            {
+                for( const std::string_view alias : { std::string_view( " as " ), std::string_view( " in " ) } )
+                {
+                    if( const std::size_t at = target.find( alias );  at != std::string::npos )
+                    {
+                        target.erase( at );
+                    }
+                }
             }
         }
     }

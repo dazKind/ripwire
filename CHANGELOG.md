@@ -15,6 +15,23 @@ not published here — see `docs/EVALS.md` for the instruments behind the headli
 
 ## [Unreleased]
 
+### Added — Haxe (`.hx`) joins the language line
+
+A twenty-second vendored grammar, `tong/tree-sitter-haxe` v0.5.0 (MIT, ABI 15, no external scanner),
+and `queries/haxe/tags.scm`. Classes, interfaces, enums, abstracts, typedefs, methods, module-level
+functions, enum constructors and SCREAMING constants index as symbols; `f()`, `o.m()`, `T.s()` and
+`new T()` are call edges; `extends` / `implements` are inheritance edges; `import` / `using` are import
+records (a `.hx` file is a node in `--deps`). Cyclomatic complexity counts `if`, `for`, `while` /
+`do … while`, each `case` arm, `? :`, `&&` / `||`, and each `catch`. The grammar was chosen by
+measurement, not stars: over HaxeFoundation/haxe `std/` (2583 files), HaxeFlixel/flixel (348) and
+HeapsIO/heaps (593), files carrying at least one ERROR node were 32.6% / 31.0% / 46.0% under this
+grammar against 40.9% / 64.1% / 86.0% for the more-starred alternative's `main` and 92.3% / 88.8% /
+94.8% for its only tagged release; the residual gaps (`overload`, `abstract X from Int {}`, `#if` inside
+an expression) are localised to a token by tree-sitter's recovery and the enclosing declarations survive.
+Stated floors: static-extension receivers are not rewritten, enum-abstract values and non-SCREAMING
+fields are not indexed, no HAS-A field edges, essential complexity withheld. Gate: `test/haxecheck.sh`.
+Bumps `kParserVer` to 78.
+
 ### Added — `--plan-lanes` now recommends a Codex model and reasoning effort per lane
 
 Every lane carries an advisory `execution` object with a current Codex model, reasoning effort, the

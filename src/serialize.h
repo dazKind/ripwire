@@ -581,6 +581,13 @@ inline constexpr TokenCalib kTokenCalib[] =
                                    // that put Ruby at the dense end of the band, so Lua borrows Ruby's exact
                                    // 2.40 rather than guessing. Recalibrate with Ruby. Same headroom clamp:
                                    // `s.lang==Lua` (19) never reaches contentBytesByLang[13].
+    { Lang::Haxe,       2.55 },   // REASONED, not measured — Haxe's emitted stream is PascalCase type names
+                                   // and camelCase methods (the Haxe std/ and HaxeFlixel conventions, and the
+                                   // haxe/std shape-recall run in the port round confirmed the shape), which
+                                   // is Java's and C#'s band, so Haxe borrows their 2.55 rather than guessing.
+                                   // Recalibrate with Java/CSharp/PHP when tokenbudgetcheck next gets a Haxe
+                                   // corpus sample. Same headroom clamp: `s.lang==Haxe` (20) never reaches
+                                   // contentBytesByLang[13].
 };
 inline constexpr double kBytesPerTokenDefault = 2.50;   // Unknown-language / empty-map fallback (mid-band)
 

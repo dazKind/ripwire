@@ -126,7 +126,7 @@ if(RIPWIRE_LTO)
   # The VARIABLE, set HERE — before the first add_executable/add_library and before FetchContent pulls
   # the vendored tree-sitter subproject in. CMAKE_INTERPROCEDURAL_OPTIMIZATION seeds the property on
   # targets created AFTER it, so this placement (and only this placement) reaches all three groups that
-  # matter: our C++, the twenty-one C grammar objects, and the tree-sitter core in its own subdirectory.
+  # matter: our C++, the twenty-two C grammar objects, and the tree-sitter core in its own subdirectory.
   # Cross-language is the point — the accessors we want inlined are C, the loop calling them is C++.
   set(CMAKE_INTERPROCEDURAL_OPTIMIZATION ON)
   message(STATUS "RIPWIRE_LTO: ON — link-time optimization across our code and the vendored C (slower link, see docs/OPTREMARKS.md F1)")
@@ -243,6 +243,7 @@ set(_ripwire_query_names
   cpp
   csharp
   go
+  haxe
   java
   javascript
   json
@@ -455,6 +456,21 @@ add_ts_grammar(cuda   https://github.com/tree-sitter-grammars/tree-sitter-cuda.g
 # serialize (unlike toml's stateless one), but through create/destroy/serialize callbacks the core
 # owns — no new leak surface, and the G1 leg is run with the existing suppressions unchanged.
 add_ts_grammar(lua    https://github.com/tree-sitter-grammars/tree-sitter-lua.git 10fe0054734eec83049514ea2e718b2a56acd0c9)  # v0.5.0
+# Haxe (.hx): tong/tree-sitter-haxe — there is no first-party Haxe grammar under tree-sitter/ or
+# tree-sitter-grammars/. CHOSEN BY MEASUREMENT, not by star count (2026-09-06, the C harness in the port
+# round's scratch tree, ERROR/MISSING nodes counted over three real corpora — HaxeFoundation/haxe std/
+# 2583 files, HaxeFlixel/flixel 348, HeapsIO/heaps 593): files carrying at least one ERROR node were
+# 32.6% / 31.0% / 46.0% under tong v0.5.0 versus 40.9% / 64.1% / 86.0% under vantreeseba main and
+# 92.3% / 88.8% / 94.8% under vantreeseba v0.13.0 (the only tagged release of the more-starred grammar).
+# vantreeseba main also carries a 41 MB parser.c (STATE_COUNT 26287 — a conflict-blown table, 5x this
+# one) and a STATEFUL external scanner; tong's is 7.8 MB with NO scanner.c, so it brings none of the
+# serialize/leak hazard the yaml/markdown patches exist for. Node kinds mirror the Haxe compiler's own
+# AST (ClassType/ClassMethod/ECall/ENew/EField/TypePath), which is what queries/haxe/tags.scm reads.
+# v0.5.0 → ABI 15, in [MIN_COMPATIBLE, LANGUAGE_VERSION]=[13,15] for core v0.26.9. The tag is
+# lightweight, so the SHA below IS the tagged commit. The residual ERROR nodes are grammar gaps
+# (`overload` access modifier, `abstract X from Int {}` with no underlying type, `#if` inside an
+# expression) that tree-sitter's recovery localises to a token; the enclosing declarations survive.
+add_ts_grammar(haxe   https://github.com/tong/tree-sitter-haxe.git                3705db41366a4617b518059420ce739d9da3a056)  # v0.5.0
 
 # PHP (.php): the official tree-sitter org grammar. Like TypeScript this repo hosts TWO sub-grammars
 # in subdirectories — `php/` (the full one: HTML text interleaved with `<?php … ?>` blocks) and
@@ -515,6 +531,7 @@ set(RIPWIRE_TS_OBJECTS
   $<TARGET_OBJECTS:ts_ruby>
   $<TARGET_OBJECTS:ts_json>
   $<TARGET_OBJECTS:ts_lua>
+  $<TARGET_OBJECTS:ts_haxe>
   $<TARGET_OBJECTS:ts_php>
   $<TARGET_OBJECTS:ts_toml>
   $<TARGET_OBJECTS:ts_yaml>
@@ -711,7 +728,7 @@ endif()
 set(RIPWIRE_GRAMMAR_TARGETS
   ts_cpp ts_python ts_go ts_rust ts_tsts ts_tstsx ts_swift ts_objc
   ts_javascript ts_bash ts_java ts_ruby ts_json ts_toml ts_yaml ts_csharp ts_c ts_cuda ts_markdown
-  ts_php ts_lua)
+  ts_php ts_lua ts_haxe)
 set(RIPWIRE_RUNTIME_COMPILE_TARGETS ripwire_probe ripwire tree-sitter ${RIPWIRE_GRAMMAR_TARGETS})
 set(RIPWIRE_RUNTIME_LINK_TARGETS ripwire_probe ripwire)
 # The C++ subset of the compile list — the only targets that include a C++ standard library at all, and so
@@ -931,5 +948,6 @@ if(RIPWIRE_FUZZ)
   add_ripwire_fuzzer(c          tree_sitter_c          c)
   add_ripwire_fuzzer(php        tree_sitter_php        php)
   add_ripwire_fuzzer(lua        tree_sitter_lua        lua)
+  add_ripwire_fuzzer(haxe       tree_sitter_haxe       haxe)
   add_custom_target(ripwire_fuzzers DEPENDS ${RIPWIRE_FUZZ_TARGETS})
 endif()

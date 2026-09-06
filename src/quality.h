@@ -1398,7 +1398,9 @@ inline std::string headSnapRepoHex( const std::string& root )
 // FOLLOW-UP for whoever owns ingest.{h,cpp}: promote the two constants into ingest.h and turn the gate into a
 // `static_assert` — this lane's file boundary forbade editing those files.
 constexpr std::uint32_t kIngestCacheVersionMirror = 15;   // MUST equal ingest.cpp's kCacheVersion (gated)
-constexpr std::uint32_t kIngestParserVerMirror    = 77;   // MUST equal ingest.cpp's kParserVer   (gated)
+constexpr std::uint32_t kIngestParserVerMirror    = 78;   // MUST equal ingest.cpp's kParserVer   (gated)
+                                                          // 78 = 2026-09-06 (Haxe port): tong/tree-sitter-haxe v0.5.0 +
+                                                          // queries/haxe/tags.scm. See ingest_cache.h's kParserVer note.
                                                           // 77 = 2026-09-03 (Phase 5): Python super() receiver kind +
                                                           // import-name bindings. See ingest_cache.h's kParserVer note.
                                                           // 74 = 2026-08-30 (objc-sniff lane): looksObjC masks comments

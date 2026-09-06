@@ -77,7 +77,7 @@ inline bool isValidSeverity( std::string_view s ) noexcept
 inline bool langFromToken( std::string_view tok, Lang& out ) noexcept
 {
     struct Row { std::string_view name; Lang lang; };
-    static constexpr std::array<Row, 15> kMap = { {
+    static constexpr std::array<Row, 16> kMap = { {
         { "cpp",        Lang::Cpp        },
         { "python",     Lang::Python     },
         { "typescript", Lang::TypeScript },
@@ -93,6 +93,7 @@ inline bool langFromToken( std::string_view tok, Lang& out ) noexcept
         { "c",          Lang::C          },
         { "php",        Lang::Php        },
         { "lua",        Lang::Lua        },
+        { "haxe",       Lang::Haxe       },
     } };
     for( const Row& r : kMap )
     {
@@ -124,7 +125,7 @@ inline Lang langOfPath( std::string_view path ) noexcept
     }
 
     struct Row { std::string_view ext; Lang lang; };
-    static const std::array<Row, 30> kExt = { {
+    static const std::array<Row, 31> kExt = { {
         { ".cpp", Lang::Cpp }, { ".cc", Lang::Cpp }, { ".cxx", Lang::Cpp },
         { ".h", Lang::Cpp }, { ".hpp", Lang::Cpp }, { ".hh", Lang::Cpp }, { ".hxx", Lang::Cpp }, { ".c", Lang::C },
         { ".py", Lang::Python },
@@ -140,6 +141,7 @@ inline Lang langOfPath( std::string_view path ) noexcept
         { ".cs", Lang::CSharp },
         { ".php", Lang::Php },
         { ".lua", Lang::Lua },
+        { ".hx", Lang::Haxe },
     } };
     for( const Row& r : kExt )
     {
@@ -161,7 +163,8 @@ inline Lang langOfPath( std::string_view path ) noexcept
 // preproc_include/#import, Python/TS/JS's import_statement(_from), Rust's use_declaration/mod_item,
 // Go/Swift/Java's import_declaration — Java shares that node-type SPELLING with Go/Swift so it is
 // captured too, even though only best-effort resolved — and C#'s using_directive; PHP's
-// namespace_use_declaration joined them in the PHP/Lua port round). Bash/Ruby/Lua/Json/Toml/Yaml/
+// namespace_use_declaration joined them in the PHP/Lua port round, and Haxe's `import`/`using` nodes
+// in the Haxe port). Bash/Ruby/Lua/Json/Toml/Yaml/
 // Markdown/Unknown have no branch there and never produce an Include record (confirmed empirically: a
 // require/source/JSON-only fixture emits `<deps files="0">`). LUA is worth a word for the same reason
 // Ruby is: `require "mod"` LOOKS like an import and is not one — it is an ordinary call to an ordinary
@@ -177,7 +180,7 @@ inline bool dependencyCapable( Lang lang ) noexcept
         case Lang::Cpp: case Lang::C: case Lang::ObjC:
         case Lang::Python: case Lang::TypeScript: case Lang::JavaScript:
         case Lang::Rust: case Lang::Go: case Lang::Swift:
-        case Lang::Java: case Lang::CSharp: case Lang::Php:
+        case Lang::Java: case Lang::CSharp: case Lang::Php: case Lang::Haxe:
             return true;
         case Lang::Bash: case Lang::Ruby: case Lang::Lua: case Lang::Json: case Lang::Toml: case Lang::Yaml: case Lang::Markdown: case Lang::Unknown:
         default:

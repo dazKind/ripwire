@@ -190,7 +190,15 @@ constexpr std::uint32_t kCacheVersion = 15;           // 15 (offset-table blob):
                                                       //    (Py `pkg.mod`, TS `./x`, Rust `crate::a::b`/`mod:x`) —
                                                       //    a target FORMAT change → old caches must be rejected.
                                                       // 4: Include gained a `bool isAngle` (quote/angle) field
-constexpr std::uint32_t kParserVer    = 77;           // bump on any grammar/.scm/extraction change
+constexpr std::uint32_t kParserVer    = 78;           // bump on any grammar/.scm/extraction change
+                                                      // 78 = 2026-09-06 (Haxe port): one new vendored grammar
+                                                      //    (tong/tree-sitter-haxe v0.5.0) and one new tags query,
+                                                      //    so the extracted SET grows on any tree holding a .hx
+                                                      //    file — those files used to leave the index as
+                                                      //    unsupported-ext; a v77 blob on such a tree is missing
+                                                      //    every one of those rows -> reject. Existing corpora are
+                                                      //    byte-identical: every shared-path edit is Lang-gated or
+                                                      //    keyed on node kinds only this grammar emits.
                                                       // 77 = 2026-09-03 (Phase 5, docs/EVALS.md): two Python
                                                       //    ingest FACTS — (a) a `super()` call receiver classifies
                                                       //    RecvKind::SuperObj (appended) instead of None, so

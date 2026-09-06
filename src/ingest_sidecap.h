@@ -1629,6 +1629,27 @@ void captureTagsFacts( TSQueryCursor* cursor, const LangEntry& le, std::uint32_t
                     { body = ch; break; }
                 }
             }
+            // Haxe-only body fallback, the ObjC case's sibling: tong/tree-sitter-haxe gives ClassType /
+            // AbstractType / EnumType NO body node at all — the members are direct children between two
+            // anonymous `{` `}` tokens — so the field lookup returns null and every Haxe type would read as a
+            // body-less DECL (bodyByte 0): shadowable by the decl/def collapse, and with a "signature" that
+            // runs to the closing brace, i.e. the whole class text in every signature surface. The opening
+            // `{` child IS the body start. Methods never reach here (ClassMethod/EFunction own a `body:` field;
+            // an interface's body-less method correctly stays a decl). GATED to Lang::Haxe: no other grammar's
+            // bodyByte moves. A brace-less `typedef X = Y;` has no `{` and stays a decl, which is what it is.
+            if( ts_node_is_null( body ) && le.lang == Lang::Haxe )
+            {
+                const std::uint32_t childCount = ts_node_child_count( defNode );
+                for( std::uint32_t ci = 0; ci < childCount; ++ci )
+                {
+                    const TSNode ch = ts_node_child( defNode, ci );
+                    if( std::strcmp( ts_node_type( ch ), "{" ) == 0 )
+                    {
+                        body = ch;
+                        break;
+                    }
+                }
+            }
 
             d.startByte = ts_node_start_byte( defNode );
             d.endByte   = isTestMacroBlock ? ts_node_end_byte( body ) : ts_node_end_byte( defNode );   // LB-E: the span runs THROUGH the sibling block

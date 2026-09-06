@@ -28,6 +28,21 @@ namespace
 // condition, no branch. Counting it would not be a floor, it would be a wrong number, which is the one
 // direction the honesty rule forbids. Every other language's answer is byte-identical to before the
 // parameter existed (the Lua carve-out is the only place `lang` is read).
+//
+// Haxe (tong/tree-sitter-haxe, kinds mirror the compiler's own AST) is the second reader of `lang`, for two
+// reasons. (1) Its kinds are its own — `EIf`, `EFor` (always for-in), `EWhile` (both `while` and
+// `do … while`), each `switch_case` arm (switch_default is the fall-through and is NOT counted, like a
+// C-family `default:`), and the `? :` ETernary — but `switch_case` is ALSO the JS/TS grammar's spelling, which
+// this predicate has never counted; admitting it un-gated would move every TypeScript cx, so the whole Haxe
+// family is gated. (2) `conditional` is Ruby's `? :` here, and in the Haxe grammar the SAME spelling is a
+// compile-time `#if … #end` block — neither a branch nor a loop — so Ruby's row is gated off for Haxe.
+// A Haxe `catch` is not a node at all: each one is a `body:` field child of ETry, counted in cc_walk
+// (haxeNamedFieldChildCount). cc_isNestingControl mirrors both gates.
+inline bool haxeDecisionKind( const char* t ) noexcept
+{
+    return    std::strcmp( t, "EIf" ) == 0        || std::strcmp( t, "EFor" ) == 0        || std::strcmp( t, "EWhile" ) == 0
+           || std::strcmp( t, "switch_case" ) == 0 || std::strcmp( t, "ETernary" ) == 0;
+}
 inline bool isDecisionType( const char* t, Lang lang ) noexcept
 {
     return    std::strcmp( t, "if_statement" ) == 0       || std::strcmp( t, "if_expression" ) == 0
@@ -58,7 +73,7 @@ inline bool isDecisionType( const char* t, Lang lang ) noexcept
            || std::strcmp( t, "if_modifier" ) == 0        || std::strcmp( t, "unless_modifier" ) == 0
            || std::strcmp( t, "while_modifier" ) == 0     || std::strcmp( t, "until_modifier" ) == 0
            || std::strcmp( t, "when" ) == 0               || std::strcmp( t, "in_clause" ) == 0
-           || std::strcmp( t, "rescue" ) == 0             || std::strcmp( t, "conditional" ) == 0
+           || std::strcmp( t, "rescue" ) == 0             || ( std::strcmp( t, "conditional" ) == 0 && lang != Lang::Haxe )
            // C# (tree-sitter-c-sharp): `foreach` is a distinct loop node (not `for_statement`); each
            // classic-switch `case`/`default` arm is a `switch_section`, each modern switch-expression
            // arm is a `switch_expression_arm` — both are the per-arm decision, matching Ruby's `when`.
@@ -68,7 +83,8 @@ inline bool isDecisionType( const char* t, Lang lang ) noexcept
            // missed (kParserVer 44). Also load-bearing for essential complexity: ev's per-construct weights
            // mirror this predicate exactly (ev_ctrl machinery below), so counting the guard-else exit in ev
            // without counting the guard here would break the structural ev <= cx containment.
-           || std::strcmp( t, "guard_statement" ) == 0;
+           || std::strcmp( t, "guard_statement" ) == 0
+           || ( lang == Lang::Haxe && haxeDecisionKind( t ) );   // see haxeDecisionKind's note for both gates
 }
 
 // (cyclomatic is now counted inside the fused cc_walk / complexityOf below — one DFS computes cx AND ccx.)
@@ -106,8 +122,11 @@ inline bool cc_isNestingControl( const char* t, Lang lang ) noexcept
            || std::strcmp( t, "while" ) == 0             || std::strcmp( t, "until" ) == 0
            || std::strcmp( t, "for" ) == 0               || std::strcmp( t, "case" ) == 0
            || std::strcmp( t, "case_match" ) == 0        || std::strcmp( t, "rescue" ) == 0
-           || std::strcmp( t, "conditional" ) == 0
-           || std::strcmp( t, "foreach_statement" ) == 0;   // C# `foreach (var x in xs)` — a distinct loop node
+           || ( std::strcmp( t, "conditional" ) == 0 && lang != Lang::Haxe )   // Ruby `? :`; a Haxe `#if` block is neither control nor decision
+           || std::strcmp( t, "foreach_statement" ) == 0    // C# `foreach (var x in xs)` — a distinct loop node
+           // Haxe: the decision kinds each open a nested body, plus ESwitch as the switch-equivalent container
+           // (flat +1, arms score via isDecisionType — mirrors switch_statement). Gated like isDecisionType.
+           || ( lang == Lang::Haxe && ( haxeDecisionKind( t ) || std::strcmp( t, "ESwitch" ) == 0 ) );
            // NOTE: Ruby `elsif` is intentionally NOT here — like a C-family else-if / Python elif_clause it is a
            // flat +1 that does not deepen nesting; it is handled in the elif_clause/else_clause branch of cc_walk.
 }
@@ -145,15 +164,17 @@ inline std::string_view nodeFieldText( TSNode node, const char* field, std::uint
 // a boolean run?) and cc_isBooleanJoin (cyclomatic: does it count as a decision at all?). They ask
 // different questions of the same string, and before the PHP/Lua port they answered them from two
 // hand-copied spans — a duplication --quality-delta scored the moment the second one grew a case.
-inline std::string_view cc_operatorText( TSNode n, std::string_view src ) noexcept
+inline std::string_view cc_operatorText( TSNode n, std::string_view src, Lang lang ) noexcept
 {
-    return nodeFieldText( n, "operator", 8, src );
+    // Haxe's EBinop spells the field `op:`; every other vendored grammar spells it `operator:`. Lang-gated,
+    // not "try both": a grammar that happens to carry an `op:` field must not start scoring boolean runs.
+    return lang == Lang::Haxe ? nodeFieldText( n, "op", 2, src ) : nodeFieldText( n, "operator", 8, src );
 }
 
 // the boolean-operator spelling of a node, or "" if it isn't one (&&/|| for C-family, and/or for Python)
-inline std::string_view cc_boolOp( TSNode n, std::string_view src ) noexcept
+inline std::string_view cc_boolOp( TSNode n, std::string_view src, Lang lang ) noexcept
 {
-    const std::string_view o = cc_operatorText( n, src );
+    const std::string_view o = cc_operatorText( n, src, lang );
     return ( o == "&&" || o == "||" || o == "and" || o == "or" ) ? o : std::string_view{};
 }
 
@@ -171,7 +192,7 @@ inline std::string_view cc_boolOp( TSNode n, std::string_view src ) noexcept
 // isDecisionType already names, so counting it here too would double it.
 inline bool cc_isBooleanJoin( TSNode n, std::string_view src, Lang lang ) noexcept
 {
-    const std::string_view o        = cc_operatorText( n, src );
+    const std::string_view o        = cc_operatorText( n, src, lang );
     const bool             wordLang = ( lang == Lang::Lua || lang == Lang::Php );
     return    o == "&&" || o == "||"
            || ( wordLang && ( o == "and" || o == "or" ) )
@@ -326,7 +347,42 @@ struct CcAccum
 // a preprocessor simply never match — no per-language gate needed.
 inline bool cc_isPreprocAlternative( const char* t ) noexcept
 {
-    return std::strncmp( t, "preproc_else", 12 ) == 0 || std::strncmp( t, "preproc_elif", 12 ) == 0;
+    return    std::strncmp( t, "preproc_else", 12 ) == 0 || std::strncmp( t, "preproc_elif", 12 ) == 0
+           || std::strcmp( t, "conditional_elseif" ) == 0 || std::strcmp( t, "conditional_else" ) == 0;   // Haxe `#elseif` / `#else`
+}
+
+// Haxe: the NAMED children of `n` carrying field `field`. tong/tree-sitter-haxe tags whole sequences with
+// one field name — `args:` covers the FunctionArg nodes AND the commas between them, `body:` covers a
+// parenthesised body's `(` `)` tokens too — so the anonymous children must be skipped or a two-parameter
+// method reads as three. A cursor walk, not ts_node_child( n, i ): that accessor restarts from the first
+// child on every call (O(C²), the ChildCursor note above), and the cursor hands out the field name for free.
+//
+// Two readers. (1) A `catch` clause is not a node of its own — each one is laid out as three field children
+// of the ETry (`(identifier) type: (ComplexType) body: (EBlock)`), with the try block itself positional, so
+// the catch count IS the named `body:` count, one decision each exactly as a C-family catch_clause is.
+// (2) There is no parameter-list node either: a ClassMethod / EFunction / EArrowFunction carries its
+// parameters as `args:` FunctionArg children of the def node itself, which is what countParams reads.
+inline std::uint16_t haxeNamedFieldChildCount( TSNode n, const char* field ) noexcept
+{
+    std::uint16_t count = 0;
+    TSTreeCursor  cur   = ts_tree_cursor_new( n );
+    if( ts_tree_cursor_goto_first_child( &cur ) )
+    {
+        do
+        {
+            const char* fieldName = ts_tree_cursor_current_field_name( &cur );
+            if( fieldName != nullptr && std::strcmp( fieldName, field ) == 0 && ts_node_is_named( ts_tree_cursor_current_node( &cur ) ) )
+            {
+                ++count;
+            }
+        } while( ts_tree_cursor_goto_next_sibling( &cur ) );
+    }
+    ts_tree_cursor_delete( &cur );
+    return count;
+}
+inline bool haxeFunctionKind( const char* t ) noexcept   // the three def kinds that carry `args:` — spellings only this grammar has
+{
+    return std::strcmp( t, "ClassMethod" ) == 0 || std::strcmp( t, "EFunction" ) == 0 || std::strcmp( t, "EArrowFunction" ) == 0;
 }
 
 
@@ -1047,6 +1103,10 @@ inline void cc_walk( TSNode start, std::uint32_t startNesting, std::string_view 
         {
             ++acc.cyclo;
         }
+        if( lang == Lang::Haxe && std::strcmp( t, "ETry" ) == 0 )
+        {
+            acc.cyclo += haxeNamedFieldChildCount( n, "body" );   // one decision per catch — see haxeNamedFieldChildCount
+        }
         // ppalt disclosure: an alternative-introducing preproc node is neither control nor decision, so it
         // falls through to the generic descent below (its children ARE walked and summed — that summing is
         // exactly what this counter discloses).
@@ -1063,17 +1123,19 @@ inline void cc_walk( TSNode start, std::uint32_t startNesting, std::string_view 
         {
             acc.locals += cc_countLocalDeclarators( n );
         }
-        else if( std::strcmp( t, "binary_expression" ) == 0 && cc_isBooleanJoin( n, src, lang ) )
+        else if( ( std::strcmp( t, "binary_expression" ) == 0 || ( lang == Lang::Haxe && std::strcmp( t, "EBinop" ) == 0 ) )
+                 && cc_isBooleanJoin( n, src, lang ) )
         {
             ++acc.cyclo;   // Myers' &&/|| extension — see cc_isBooleanJoin for the two spelling families
         }
 
         if( isNamed && cc_isNestingControl( t, lang ) )
         {
-            const bool   isIf = ( std::strcmp( t, "if_statement" ) == 0 || std::strcmp( t, "if_expression" ) == 0 );
+            const bool   isIf = ( std::strcmp( t, "if_statement" ) == 0 || std::strcmp( t, "if_expression" ) == 0 || std::strcmp( t, "EIf" ) == 0 );   // EIf: Haxe, whose `else if` is an EIf under the `else:` field of an EIf — the same parent shape the C family has
             const TSNode p    = ts_node_parent( n );
             const bool   elseIf = isIf && !ts_node_is_null( p )
-                                  && ( std::strcmp( ts_node_type( p ), "if_statement" ) == 0 || std::strcmp( ts_node_type( p ), "if_expression" ) == 0 );
+                                  && ( std::strcmp( ts_node_type( p ), "if_statement" ) == 0 || std::strcmp( ts_node_type( p ), "if_expression" ) == 0
+                                       || std::strcmp( ts_node_type( p ), "EIf" ) == 0 );
             const std::uint32_t childNest = elseIf ? nesting : nesting + 1;   // else-if doesn't deepen
             acc.cog += elseIf ? 1u : ( 1u + nesting );                           // flat +1 for else-if, else +1+nesting
             if( childNest > acc.maxNest )
@@ -1141,8 +1203,8 @@ inline void cc_walk( TSNode start, std::uint32_t startNesting, std::string_view 
             }
             continue;
         }
-        const std::string_view bop = cc_boolOp( n, src );
-        if( !bop.empty() && cc_boolOp( ts_node_parent( n ), src ) != bop )
+        const std::string_view bop = cc_boolOp( n, src, lang );
+        if( !bop.empty() && cc_boolOp( ts_node_parent( n ), src, lang ) != bop )
         {
             ++acc.cog; // new boolean run (cognitive)
         }
@@ -1363,6 +1425,13 @@ inline bool cc_isParamList( const char* t ) noexcept
 // (',', '(', ')') are unnamed → excluded by ts_node_is_named.
 inline std::uint16_t countParams( TSNode defNode )   // A4-F25: NOT noexcept — allocates (see cc_walk)
 {
+    // Haxe has no parameter-list node — the def node's own named `args:` children ARE the parameters (see
+    // haxeNamedFieldChildCount). Keyed on the def's kind, which only that grammar spells; an empty `()` yields
+    // 0 here and the search below then finds no list either, so the answer is the same real zero.
+    if( haxeFunctionKind( ts_node_type( defNode ) ) )
+    {
+        return haxeNamedFieldChildCount( defNode, "args" );
+    }
     // bounded pre-order search for the FIRST parameter list inside the def; then count its named children.
     struct PF { TSNode n; std::uint16_t depth; };
     std::vector<PF> stack;

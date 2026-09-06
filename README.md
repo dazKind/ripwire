@@ -16,7 +16,7 @@ deterministic call graph — what to touch, what it breaks, which tests to run �
 around and reading whole files.
 
 **Languages:** Rust · C++ · Objective-C/C++ · C · Metal · CUDA · Python · Go · Swift · TypeScript ·
-JavaScript · Java · Ruby · PHP · Lua · Bash · C# · JSON · TOML · YAML · Markdown — [twenty-one
+JavaScript · Java · Ruby · PHP · Lua · Haxe · Bash · C# · JSON · TOML · YAML · Markdown — [twenty-two
 vendored grammars](#languages), and adding another is a vendored tree-sitter grammar plus one row in a
 declarative table.
 
@@ -619,7 +619,7 @@ cmake -S . -B build && cmake --build build -j
 **Or build from source.** Requirements: CMake 3.24+ and a C++23 compiler — that means clang 16+ /
 AppleClang 15+ (Xcode 15) / gcc 13+ / MSVC 19.36+, and if your distro's CMake is older than 3.24,
 `pip install cmake` or `brew install cmake` gets a current one everywhere. Nothing else —
-tree-sitter's core, all 21 grammars and the test framework are vendored under `third_party/deps`,
+tree-sitter's core, all 22 grammars and the test framework are vendored under `third_party/deps`,
 so there is no download step and no package manager to satisfy. Prove that with the network off:
 add `-DFETCHCONTENT_FULLY_DISCONNECTED=ON` and the build still completes.
 
@@ -633,7 +633,7 @@ cmake -S . -B build-release -DCMAKE_BUILD_TYPE=Release && cmake --build build-re
 cmake -S . -B build && cmake --build build -j
 ```
 
-Parses **C/C++, Objective-C/C++, Python, TypeScript, JavaScript, Java, Ruby, PHP, Lua, Bash, Go,
+Parses **C/C++, Objective-C/C++, Python, TypeScript, JavaScript, Java, Ruby, PHP, Lua, Haxe, Bash, Go,
 Rust, Swift, C#** — plus JSON/TOML/YAML config keys, markdown sections, Metal, and CUDA (`<<<>>>`
 launches are call edges).
 
@@ -1679,13 +1679,18 @@ imports. Dynamic dispatch — `$fn()`, `call_user_func`, `__call` — names its 
 a stated floor, not a silence), **Lua** (all five spellings that define a function, including the
 `M.f = function` and table-constructor forms; `function M:f()` is a method. Metatable inheritance is
 a runtime call with no syntax to read, so a Lua corpus reports no inheritance edges — stated, not
-implied), Bash, Go, Rust, Swift, C#, JSON + TOML + YAML (config keys — a
+implied), **Haxe** (`.hx` — classes, interfaces, enums, abstracts, typedefs, methods, module-level
+functions and SCREAMING constants; `f()`, `o.m()`, `T.s()` and `new T()` are edges, `extends` /
+`implements` are inheritance edges, `import` / `using` are imports. Grammar chosen by measured parse
+health on haxe/std, HaxeFlixel and Heaps, not by star count. A static extension — `using StringTools;
+s.trim()` — is captured as a `trim` call and resolves by name; the receiver rewrite is the typer's,
+not the text's, and is a stated floor), Bash, Go, Rust, Swift, C#, JSON + TOML + YAML (config keys — a
 `[tool.ruff.lint]` table is one symbol under its full dotted name, and
 `pyproject.toml`/`Cargo.toml`/CI workflows become greppable), and **Markdown** (`.md`/`.markdown` —
 the DOC tier: every heading, ATX or setext, is a section symbol whose span runs to the next
 same-or-higher heading, so `--for` ranks the section, `--expand` serves the section body, `--recall`
 answers section-granular, and links/`backtick` mentions are doc→doc and doc→code edges).
-Twenty-one tree-sitter grammars, all vendored.
+Twenty-two tree-sitter grammars, all vendored.
 
 Want another language? The pipeline is language-agnostic past the parse: a new language is a
 vendored tree-sitter grammar, its query file, and one row in the declarative
