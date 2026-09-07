@@ -239,13 +239,18 @@ inline EditCheckContract editCheckContractVsHead( const IngestResult& ing, const
 
     // HEAD baseline — the warm path MUST hit computeHeadSnapshot's own qsnap cache (the ≤100ms budget).
     auto [ base, baselineOk ] = quality::computeHeadSnapshot( root, nullptr, maxFileBytes, excludes );
-    if( !baselineOk || base.locBySym.find( key ) == base.locBySym.end() )
+    if( !baselineOk )
+    {
+        // 2026-09-06 stranger audit: a tarball, an export, any non-git tree used to answer "new-symbol" for a
+        // symbol that plainly exists — a false contract claim whose only tell was a missing at=. No HEAD means
+        // no comparison: say so, claim nothing.
+        res.status = "no-baseline";
+        DEGRADED_PATH_ALERT( "edit-check: no git HEAD baseline — status no-baseline" );
+        return res;
+    }
+    if( base.locBySym.find( key ) == base.locBySym.end() )
     {
         res.status = "new-symbol";
-        if( !baselineOk )
-        {
-            DEGRADED_PATH_ALERT( "edit-check: no git HEAD baseline available — treating SYM as new-symbol" );
-        }
         return res;
     }
 
@@ -313,7 +318,7 @@ inline EditCheckContract editCheckContractVsHead( const IngestResult& ing, const
 // the max while the count stays (a 1-arg replaced by another 1-arg) moves nothing here either.
 struct EditCheckVerdict
 {
-    const char* status;   // unchanged / new-symbol / contract-change — the DOCUMENT's headline
+    const char* status;   // unchanged / new-symbol / contract-change / no-baseline — the DOCUMENT's headline
     std::string change;   // the evidence list, non-empty exactly when status == "contract-change"
 };
 
@@ -321,9 +326,9 @@ inline EditCheckVerdict editCheckVerdict( const EditCheckContract& contract, std
 {
     // new-symbol is not reassurance ABOUT A CONTRACT — there was none to compare against — so it is never
     // escalated and carries no change list. Its callers can still be flagged; that is the payload's job.
-    if( std::string_view( contract.status ) == "new-symbol" )
+    if( std::string_view( contract.status ) == "new-symbol" || std::string_view( contract.status ) == "no-baseline" )
     {
-        return EditCheckVerdict { contract.status, std::string {} };
+        return EditCheckVerdict { contract.status, std::string {} };   // nothing to compare against: no evidence list
     }
 
     std::string change;
@@ -586,7 +591,9 @@ inline std::string editCheckBundleText( const IngestResult& ing, const Graph& g,
                "preview then apply needs no read of the region first. ";
     }
     out += "SYM's contract (param count + publicness) NOW vs git HEAD — unchanged/new-symbol/"
-                       "contract-change — plus its 1-hop callers. A caller is flagged incompatible=\"1\" when its argument count "
+                       "contract-change, or no-baseline when the root has no git HEAD to compare against (not a repository, or "
+                       "no commit yet): then NOTHING is claimed about the contract, and a symbol is never called new for want "
+                       "of a baseline — plus its 1-hop callers. A caller is flagged incompatible=\"1\" when its argument count "
                        "was reliably counted and NO definition in the folded set could accept it: every one has a FIXED arity that "
                        "disagrees. A variadic, defaulted or implicit-receiver definition (a Python/Ruby method, whose params counts "
                        "the self/cls the call site never writes) has no fixed arity and is never flagged. That makes the ARITY half "

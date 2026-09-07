@@ -31,12 +31,14 @@
 #   (E) the LINEAGE arm — README.md's "M repositories and P papers … survey of N tools" sentence must
 #       equal the row counts of docs/LINEAGE.md's own tables. Same discipline as (B), different
 #       ground truth: an advertised number is an ENUMERATED number, so the enumeration is the
-#       authority and the prose is checked against it. Sub-arms E1-E8 below; E4 is (E)'s mutation
-#       control, exactly as (C) is (B)'s, and E6/E7 carry their own.
+#       authority and the prose is checked against it. Sub-arms E1-E9 below; E4 is (E)'s mutation
+#       control, exactly as (C) is (B)'s, and E6/E7 carry their own. E9 checks a SECOND restatement
+#       of the folded/surveyed pair that drifted independently of the one E5 checks — see E9's own
+#       comment for the round that found it stale.
 #
 # WHY E6-E8 EXIST. A count can be arithmetically correct and still be a lie about a SET. LINEAGE.md
-# claims its folded tables and its surveyed table are DISJOINT — that is what makes "27 folded plus
-# 220 surveyed" an addition rather than a subset relation, and it is the whole justification for
+# claims its folded tables and its surveyed table are DISJOINT — that is what makes "36 folded plus
+# 231 surveyed" an addition rather than a subset relation, and it is the whole justification for
 # printing both numbers in one sentence. Nothing checked it, and it was false in four places at once
 # (Aider, Cody and octocode were folded rows repeated in the survey; RepoGraph was a §2 paper row
 # repeated there too). E7's failure mode is cheaper still: `comby` was listed in two different
@@ -120,7 +122,7 @@ fi
 # ── (D) cross-check — must equal flagsurfacecheck.sh's own harvest of the same --help text ──────────
 # Runs the sibling gate itself (not a hand-copied re-derivation) so a future edit to EITHER script's
 # scrape regex shows up here as a disagreement instead of two silently-diverging notions of "the count".
-FLAGSURFACE_OUT="$( bash "$ROOT/test/flagsurfacecheck.sh" 2>&1 )"
+FLAGSURFACE_OUT="$( bash "$ROOT/test/flagsurfacecheck.sh" "$BIN" 2>&1 )"   # 2026-09-06: forward $BIN — without it the sibling defaulted to build/ripwire and this arm was red in any tree without one
 flagsurface_count="$( printf '%s\n' "$FLAGSURFACE_OUT" | grep -oE 'harvested [0-9]+ advertised long flags' | head -1 | grep -oE '[0-9]+' )"
 if [ -z "$flagsurface_count" ]; then
     no "(D) could not find flagsurfacecheck.sh's 'harvested N advertised long flags' line — did its output format change?"
@@ -223,6 +225,55 @@ else
     ok "(E4) mutation control: a fabricated repository count ($bad_repos) is correctly seen as disagreeing with the derived count ($d_folded)"
 fi
 
+# (E10) LINEAGE's DISJOINTNESS SENTENCE must carry the same numbers as its own header.
+# E5 checks the header. Nothing checked the sentence two lines below it that EXPLAINS the header --
+# and it had drifted a full round behind: the header read 36 repositories / 231 tools while the
+# sentence still said "34 folded plus 222 surveyed -- not 34 picked out of 222". The gate's OWN
+# header comment was a round older again at "27 folded plus 220 surveyed". Prose that illustrates a
+# derived number is itself a claim about that number, and an unchecked illustration drifts exactly
+# like an unchecked headline -- it just looks like commentary, which is why nobody re-derives it.
+# The sentence carries FOUR numbers, not two: "N folded plus M surveyed -- not X picked out of Y".
+# An earlier draft of this arm checked only N and M. That is exactly where round-c's copy of this
+# sentence went wrong -- "41 folded plus 237 surveyed -- not 41 picked out of 239", with 237 and 239
+# two clauses apart -- and nothing saw it. All four must equal the table-derived pair. Flattened
+# through tr because the sentence wraps across a line break in the source.
+disjFlat="$( tr '\n' ' ' < "$LINEAGE" )"
+disj="$( printf '%s' "$disjFlat" | grep -oE 'field study [0-9]+ folded \*plus\* [0-9]+ surveyed[^.]*picked *out of [0-9]+' | head -1 )"
+dj_folded="$( printf '%s' "$disj" | grep -oE '[0-9]+ folded' | grep -oE '^[0-9]+' )"
+dj_surveyed="$( printf '%s' "$disj" | grep -oE '[0-9]+ surveyed' | grep -oE '^[0-9]+' )"
+if [ -z "$dj_folded" ] || [ -z "$dj_surveyed" ]; then
+    no "(E10) docs/LINEAGE.md has no 'field study N folded plus M surveyed' sentence to check"
+else
+    dj_picked="$( printf '%s' "$disj" | grep -oE 'not [0-9]+ picked' | grep -oE '[0-9]+' )"
+    dj_outof="$(  printf '%s' "$disj" | grep -oE 'out of [0-9]+'     | grep -oE '[0-9]+' )"
+    if [ "$dj_folded" = "$d_folded" ] && [ "$dj_surveyed" = "$d_surveyed" ] \
+       && [ "$dj_picked" = "$d_folded" ] && [ "$dj_outof" = "$d_surveyed" ]; then
+        ok "(E10) LINEAGE's disjointness sentence agrees with its own tables on all four numbers ($dj_folded/$dj_surveyed/$dj_picked/$dj_outof)"
+    else
+        no "(E10) LINEAGE's disjointness sentence states $dj_folded folded + $dj_surveyed surveyed, not $dj_picked picked out of $dj_outof — its tables enumerate $d_folded + $d_surveyed"
+    fi
+fi
+# (E10-control) MUTATE A REAL COPY and re-run the identical extraction over it. An earlier draft of
+# this control compared d_folded+9 against d_folded -- arithmetic that is true by construction and
+# exercises none of the parsing above. That is the vacuous-control shape this suite has now been bitten
+# by three times: the control must fail when the thing it guards is broken, which means it has to run
+# the SAME extraction over deliberately wrong INPUT, not over a fabricated number.
+dj_tmp="$( mktemp -t readmedrift_e10.XXXXXX )"
+dj_bad=$(( d_folded + 9 ))
+sed -E "s/field study ${d_folded} folded \*plus\* ${d_surveyed} surveyed/field study ${dj_bad} folded *plus* ${d_surveyed} surveyed/" "$LINEAGE" > "$dj_tmp"
+if ! grep -qE "field study ${dj_bad} folded" "$dj_tmp"; then
+    no "(E10) mutation control did not take -- the injection found no sentence to corrupt, so it proves nothing"
+else
+    m_disj="$( grep -oE 'field study [0-9]+ folded \*plus\* [0-9]+ surveyed' "$dj_tmp" | head -1 )"
+    m_folded="$( printf '%s' "$m_disj" | grep -oE '[0-9]+ folded' | grep -oE '^[0-9]+' )"
+    if [ "$m_folded" = "$d_folded" ]; then
+        no "(E10) mutation control is inert: the extraction still reads $m_folded from a corrupted copy"
+    else
+        ok "(E10) mutation control: the same extraction reads $m_folded from a corrupted LINEAGE and is seen to disagree with the derived $d_folded"
+    fi
+fi
+rm -f "$dj_tmp"
+
 # (E5) docs/LINEAGE.md's own header prose must equal its own tables
 set -- $( counts_from "$LINEAGE" )
 l_repos="${1:-}"; l_papers="${2:-}"; l_tools="${3:-}"
@@ -232,6 +283,31 @@ elif [ "$l_repos" = "$d_folded" ] && [ "$l_papers" = "$d_papers" ] && [ "$l_tool
     ok "(E5) docs/LINEAGE.md's header ($l_repos / $l_papers / $l_tools) agrees with its own tables"
 else
     no "(E5) docs/LINEAGE.md's header states $l_repos / $l_papers / $l_tools but its own tables enumerate $d_folded / $d_papers / $d_surveyed"
+fi
+
+# (E9) docs/LINEAGE.md's header carries a SECOND folded/surveyed restatement, in the very next
+#      sentence, that is NOT the bolded pair (E5) checks: "...which makes the field study N folded
+#      *plus* M surveyed — not N picked out of M." This is a repositories/tools pair, not a
+#      papers pair — "the field study" names the tool field (§3), so it is checked against
+#      d_folded/d_surveyed, the same ground truth as (E2)/(E5), not against d_papers.
+#
+#      Round C found this sentence stuck at "34 folded plus 222 surveyed" while the bolded pair
+#      three lines earlier had already moved to 36/231 — a previous round updated one restatement of
+#      the pair and missed the other, and Round C's own prompt had already copied the stale 34/222
+#      forward as if it were current. Nothing before this arm re-derived this SPECIFIC sentence: (E5)
+#      greps for the bolded "**N repositories**"/"**N papers**"/"survey of **N tools**" forms only,
+#      which this sentence does not use (it says "N folded *plus* M surveyed", no "repositories" or
+#      "papers" or "survey of" token in reach), so (E5) walked straight past it every time.
+fp_flat="$( sed 's/\*//g' "$LINEAGE" | tr '\n' ' ' | tr -s ' ' )"
+fp_pair="$( printf '%s' "$fp_flat" | grep -oE '[0-9]+ folded plus [0-9]+ surveyed' | head -1 )"
+fp_folded="$(   printf '%s' "$fp_pair" | grep -oE '^[0-9]+' )"
+fp_surveyed="$( printf '%s' "$fp_pair" | sed -E 's/^[0-9]+ folded plus ([0-9]+) surveyed$/\1/' )"
+if [ -z "$fp_folded" ] || [ -z "$fp_surveyed" ]; then
+    no "(E9) could not find the '<N> folded plus <M> surveyed' restatement in docs/LINEAGE.md's header prose to check"
+elif [ "$fp_folded" = "$d_folded" ] && [ "$fp_surveyed" = "$d_surveyed" ]; then
+    ok "(E9) docs/LINEAGE.md's 'N folded plus M surveyed' restatement ($fp_folded / $fp_surveyed) agrees with its own tables"
+else
+    no "(E9) docs/LINEAGE.md's header restates the pair as '$fp_folded folded plus $fp_surveyed surveyed' but its own tables enumerate $d_folded folded / $d_surveyed surveyed — this is the SAME pair (E5) checks in bolded form a few lines earlier; the prose restatement drifted independently and (E5)'s green did not catch it"
 fi
 
 # ── (E6/E7) the DISJOINTNESS arms — the set claim behind the counts ─────────────────────────────────
@@ -339,6 +415,87 @@ elif [ -n "$missing_paths" ]; then
     no "(E8) docs/LINEAGE.md points at path(s) that do not exist:$missing_paths"
 else
     ok "(E8) all $path_count repo-relative paths cited by docs/LINEAGE.md exist in the tree"
+fi
+
+# ── (E9) the DECK — the third surface that states the lineage counts, and the one nothing read ──────
+# (E) enumerated the family as "README.md plus LINEAGE.md's own header". It is three files, not two:
+# present/deck5_ripwire_build.js states the same three counts on its research slide AND again, in a
+# short form, on the "every claim, and the command that re-derives it" slide — in a row that names
+# THIS GATE as the command re-deriving them. That row read "34 repos · 54 papers · 221 surveyed" while
+# the tables enumerated 36 / 67 / 231, and it shipped into a public PDF citing a gate that had never
+# opened the file. Same lesson as deckclaimcheck.sh arm (B)'s 2026-08-31 widening, same shape, same
+# fix: a claim about the counts is not exempt from the arm for living inside a slide generator.
+#
+# The deck spells the counts its own way, so this arm does NOT reuse counts_from() (which anchors on
+# README's "M repositories and P papers" prose). Two spellings, both required and both compared:
+#   long  — "<M> repositories + <P> papers folded" … "survey of <N> tools"
+#   short — "<M> repos · <P> papers · <N> surveyed"
+# Requiring BOTH is deliberate: deleting the row is the easy way out of a red, and a claim deleted is
+# a claim drifted — the same demand (B2) makes of the slide count.
+DECK="$ROOT/present/deck5_ripwire_build.js"
+if [ ! -f "$DECK" ]; then
+    no "(E9) missing present/deck5_ripwire_build.js — the deck's lineage counts have no file to check (was it moved? this arm must follow it)"
+else
+    deck_flat="$( sed 's/\*//g' "$DECK" | tr '\n' ' ' | tr -s ' ' )"
+    deck_long="$(  printf '%s' "$deck_flat" | grep -oE '[0-9]+ repositories \+ [0-9]+ papers folded' | head -1 )"
+    deck_surv="$(  printf '%s' "$deck_flat" | grep -oE 'survey of [0-9]+ tools' | head -1 )"
+    deck_short="$( printf '%s' "$deck_flat" | grep -oE '[0-9]+ repos [^0-9]+ [0-9]+ papers [^0-9]+ [0-9]+ surveyed' | head -1 )"
+
+    dl_repos="$(  printf '%s' "$deck_long"  | grep -oE '^[0-9]+' )"
+    dl_papers="$( printf '%s' "$deck_long"  | sed -E 's/^[0-9]+ repositories \+ ([0-9]+) papers folded$/\1/' )"
+    dl_tools="$(  printf '%s' "$deck_surv"  | grep -oE '[0-9]+' )"
+    set -- $( printf '%s' "$deck_short" | grep -oE '[0-9]+' )
+    ds_repos="${1:-}"; ds_papers="${2:-}"; ds_tools="${3:-}"
+
+    # (E9a) REQUIRE — both spellings must still be there. A grep that stopped matching would otherwise
+    #       compare nothing and report a permanent PASS, the green-while-inert shape (E1) guards for.
+    if [ -z "$dl_repos" ] || [ -z "$dl_papers" ] || [ -z "$dl_tools" ]; then
+        no "(E9a) the deck no longer states its lineage counts in the long form ('<M> repositories + <P> papers folded' … 'survey of <N> tools') — the claim was deleted or reworded, which is a drift, not a fix"
+    elif [ -z "$ds_repos" ] || [ -z "$ds_papers" ] || [ -z "$ds_tools" ]; then
+        no "(E9a) the deck no longer states its lineage counts in the short re-derive-row form ('<M> repos · <P> papers · <N> surveyed')"
+    else
+        ok "(E9a) the deck states its lineage counts in both forms (long: $dl_repos/$dl_papers/$dl_tools · short: $ds_repos/$ds_papers/$ds_tools)"
+    fi
+
+    # (E9b) DRIFT — every deck spelling must equal what LINEAGE.md's own tables enumerate.
+    deck9fail=0
+    for pair in "long:$dl_repos:$dl_papers:$dl_tools" "short:$ds_repos:$ds_papers:$ds_tools"; do
+        form="${pair%%:*}"; rest="${pair#*:}"
+        m="${rest%%:*}"; rest="${rest#*:}"
+        pp="${rest%%:*}"; nn="${rest#*:}"
+        # (E9a) already reported a form it could not extract; do not report the same fact twice.
+        # Spelled as an explicit if rather than `[ ] || [ ] || [ ] && continue`: that compound parses
+        # as ((A||B)||C)&&D, which is right here by luck, and is the shape that silently stops being
+        # right the moment someone adds a fourth clause.
+        if [ -z "$m" ] || [ -z "$pp" ] || [ -z "$nn" ]; then
+            continue
+        fi
+        if [ "$m" = "$d_folded" ] && [ "$pp" = "$d_papers" ] && [ "$nn" = "$d_surveyed" ]; then
+            ok "(E9b) the deck's $form form states $m repositories / $pp papers / $nn tools, matching docs/LINEAGE.md's tables"
+        else
+            no "(E9b) the deck's $form form states $m / $pp / $nn but docs/LINEAGE.md's tables enumerate $d_folded / $d_papers / $d_surveyed — update present/deck5_ripwire_build.js and rebuild the deck"
+            deck9fail=1
+        fi
+    done
+
+    # (E9c) MUTATION CONTROL for (E9b) — what (E4) is for (E2). Both spellings are shifted in one copy,
+    #       because an arm that only ever saw the long form would pass while the short row lied, which
+    #       is precisely how the deck's re-derive row went stale under a green suite.
+    E9TMP="$( mktemp -d )"
+    wrong_folded=$(( d_folded + 5 ))
+    sed -E -e "s/${d_folded} repositories \+ /${wrong_folded} repositories + /" \
+           -e "s/${d_folded} repos /${wrong_folded} repos /" "$DECK" > "$E9TMP/deck_bad.js"
+    bad_flat="$( sed 's/\*//g' "$E9TMP/deck_bad.js" | tr '\n' ' ' | tr -s ' ' )"
+    bad_long="$(  printf '%s' "$bad_flat" | grep -oE '[0-9]+ repositories \+ [0-9]+ papers folded' | head -1 | grep -oE '^[0-9]+' )"
+    bad_short="$( printf '%s' "$bad_flat" | grep -oE '[0-9]+ repos [^0-9]+ [0-9]+ papers [^0-9]+ [0-9]+ surveyed' | head -1 | grep -oE '^[0-9]+' )"
+    if [ -z "$bad_long" ] || [ -z "$bad_short" ]; then
+        no "(E9c) mutation control: could not re-extract both fabricated counts from the mutated deck copy (long='$bad_long' short='$bad_short')"
+    elif [ "$bad_long" = "$d_folded" ] || [ "$bad_short" = "$d_folded" ]; then
+        no "(E9c) mutation control: an injected wrong count did not take (long=$bad_long short=$bad_short, derived $d_folded) — the control is vacuous"
+    else
+        ok "(E9c) mutation control: fabricated deck counts (long=$bad_long, short=$bad_short) are correctly seen as disagreeing with the derived $d_folded"
+    fi
+    rm -rf "$E9TMP"
 fi
 
 # ── (F) the GATE-SCRIPT count — README's third advertised number, and the only one nothing checked ──

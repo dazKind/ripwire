@@ -8,6 +8,7 @@
 // main.cpp's unnamed namespace (one TU, one unnamed namespace — everything here keeps the internal
 // linkage it had inside main.cpp, so the split adds zero API surface) and leans on main.cpp's own
 // top-of-file #includes and preamble helpers. The RIPWIRE_MAIN_TU guard turns a second includer into
+#include "gitstamp.h"          // isShallow — the git row's shallow="1" (2026-09-06 stranger audit)
 // a compile error instead of a silent per-TU-copy ODR trap.
 
 namespace
@@ -126,6 +127,71 @@ inline std::string doctorPopenTrim( const std::string& cmd )
 // interpret. Pulled out of runDoctor (rather than inlined per check) so five small conditionals don't add
 // their nesting-weighted cognitive-complexity/verbosity cost to a function that dispatches six checks already.
 
+// 2026-09-06 stranger audit: binary-path's "copied but identical" test was equal mtime AND equal size. The
+// same 0.4.0 release installed twice (the installer installs by atomic rename, so every install has a fresh
+// mtime) came out STALE: two byte-identical files, one verdict saying reinstall. Content is the fact this check
+// is about, so read the content: ~10 ms for a 42 MB binary, cheaper than one of the git popens --doctor already
+// pays. Sizes are compared first by the caller so this only runs on a plausible pair.
+inline bool doctorSameFileBytes( const std::string& a, const std::string& b )
+{
+    std::FILE* fa   = std::fopen( a.c_str(), "rb" );
+    std::FILE* fb   = std::fopen( b.c_str(), "rb" );
+    bool       same = ( fa != nullptr && fb != nullptr );
+    if( same )
+    {
+        std::vector<char> ba( 1u << 20 ), bb( 1u << 20 );
+        for( ;; )
+        {
+            const std::size_t na = std::fread( ba.data(), 1, ba.size(), fa );
+            const std::size_t nb = std::fread( bb.data(), 1, bb.size(), fb );
+            if( na != nb || std::memcmp( ba.data(), bb.data(), na ) != 0 )
+            {
+                same = false;
+                break;
+            }
+            if( na == 0 )
+            {
+                break;
+            }
+        }
+    }
+    if( fa ) { std::fclose( fa ); }
+    if( fb ) { std::fclose( fb ); }
+    return same;
+}
+
+// Count the advisory edit-lock files under <cacheDir>/locks/<xx>/ (mcpedit.h editLockPath). They are deliberately
+// never unlinked by the process that holds them; quality.h's sweepStaleEditLocks reclaims the unheld ones older
+// than a day. Before that sweep existed one machine had 45,765 of them (2026-09-06) and --doctor could not see
+// a single one — the blob scan stops at the shard level on purpose. This count is a plain directory walk, no
+// stat, no cap: it is the number the sweep will act on.
+inline std::size_t doctorEditLockCount( const std::string& dir )
+{
+    namespace fs = std::filesystem;
+    std::size_t     count = 0;
+    std::error_code ec;
+    fs::recursive_directory_iterator it( fs::path( dir ) / "locks", fs::directory_options::skip_permission_denied, ec ), end;
+    for( ; !ec && it != end; it.increment( ec ) )
+    {
+        std::error_code sec;
+        if( it->path().filename().string().rfind( "ripwire-edit-", 0 ) == 0 && it->is_regular_file( sec ) && !sec )
+        {
+            ++count;
+        }
+    }
+    return count;
+}
+
+// 2026-09-06 stranger audit: the not-on-PATH verdict, with the fix spelled out (see the call site).
+inline std::string doctorNotOnPathHint( const std::string& selfPath, std::vector<char>& esc )
+{
+    const std::size_t slash   = selfPath.find_last_of( '/' );
+    const std::string selfDir = ( slash == std::string::npos ) ? std::string( "." ) : selfPath.substr( 0, slash );
+    return " hint=\"" + std::string( rw::escapeXml( std::string_view(
+                  "NOT ON PATH: no ripwire resolves from PATH; this run used " + selfPath
+                + " — add its directory: export PATH=\"" + selfDir + ":$PATH\" (and put that line in your shell rc file)" ), esc ) ) + "\"";
+}
+
 inline std::string doctorBinaryPathVerdictAttr( bool copied, const std::string& selfPath, const std::string& whichPath,
                                                 const struct stat& selfSt, const struct stat& whichSt, std::vector<char>& esc )
 {
@@ -138,7 +204,7 @@ inline std::string doctorBinaryPathVerdictAttr( bool copied, const std::string& 
     const std::string newerPath   = selfIsOlder ? whichPath : selfPath;
     return " hint=\"" + std::string( rw::escapeXml( std::string_view(
                   "STALE: " + olderPath + " is older than " + newerPath
-                + " — rebuild/reinstall so PATH points at the newer one, or invoke "
+                + " and their contents differ — rebuild/reinstall so PATH points at the newer one, or invoke "
                 + newerPath + " directly" ), esc ) ) + "\"";
 }
 
@@ -190,7 +256,12 @@ inline const char* doctorLegendComment()
                        "attributes are check-specific (see help). cache-dir's blobs= is capped at 4096 (kMaxCacheBlobCount); "
                        "blobs_floor=\"1\" means the cap fired and blobs= is AT LEAST that many, not exactly (absent = the true "
                        "count); truncated=\"1\" covers that AND an I/O error mid-scan, so blobs_floor= is the narrower, more "
-                       "useful claim when both matter. volatile= on a row NAMES that row's own attributes that read LIVE machine "
+                       "useful claim when both matter; locks= counts the advisory edit-lock files under locks/ (never unlinked by "
+                       "their holder; the unheld ones older than a day are swept on the next cache write). binary-path compares "
+                       "CONTENT: same_bytes 1 is the copied-install case (ok, copied 1) whatever the mtimes say; on_path 0 fails "
+                       "the row and its hint carries the export line, the state a fresh install is in until PATH is fixed. git's "
+                       "shallow 1 means the clone's history is depth-limited, so every churn number counts only the commits "
+                       "present. volatile= on a row NAMES that row's own attributes that read LIVE machine "
                        "state — cache-dir scans a per-user directory every ripwire process writes into, so two runs of this "
                        "deterministic binary legitimately differ in exactly those fields and in nothing else; a determinism "
                        "comparison strips the named attributes, never the row. tracked-binaries' truncated=\"1\" means the "
@@ -587,7 +658,12 @@ int runDoctor( const rw::Config& cfg, const char* argv0 )
 
         if( !haveWhich )
         {
-            attrs += " on_path=\"0\"";   // ripwire not found on PATH at all — not itself a failure (may run via absolute path)
+            // 2026-09-06 stranger audit: the installer's last line is "<dir> is not on PATH — add it" and the README's
+            // next command is `ripwire . --for=…`. The user who then runs THIS binary by its absolute path to ask the
+            // doctor what is wrong was told ok="1" here and passed=7/7, while `ripwire` at their prompt was "command
+            // not found". Not being on PATH is the commonest state a fresh install is in; it fails this row, with the fix.
+            ok = false;
+            attrs += " on_path=\"0\"" + doctorNotOnPathHint( selfPath, esc );
         }
         else if( haveSelf )
         {
@@ -600,8 +676,10 @@ int runDoctor( const rw::Config& cfg, const char* argv0 )
                 // Cheap content-equality fallback (degrade, don't crash): equal mtime AND equal size is the
                 // sanctioned proxy for "copied but identical" — a genuine stale shadow almost always differs
                 // in at least one. Only a real mismatch still flags ok=false.
-                const bool copied = ( selfSt.st_mtime == whichSt.st_mtime && selfSt.st_size == whichSt.st_size );
+                const bool sameBytes = ( selfSt.st_size == whichSt.st_size ) && doctorSameFileBytes( selfPath, whichPath );
+                const bool copied    = sameBytes;   // content equality, not the mtime proxy (see doctorSameFileBytes)
                 ok = copied;   // this exact failure bit the LocBench round — stale PATH binary shadows a freshly built one
+                attrs += " same_bytes=\"" + std::string( sameBytes ? "1" : "0" ) + "\"";
                 attrs += " self_mtime=\""  + std::to_string( (long long)selfSt.st_mtime )  + "\"";
                 attrs += " self_size=\""   + std::to_string( (long long)selfSt.st_size )    + "\"";
                 attrs += " which_mtime=\"" + std::to_string( (long long)whichSt.st_mtime ) + "\"";
@@ -654,6 +732,7 @@ int runDoctor( const rw::Config& cfg, const char* argv0 )
         attrs += " bytes=\"" + std::to_string( stats.totalBytes ) + "\"";
         attrs += " many=\"" + std::string( stats.blobCount > 50 ? "1" : "0" ) + "\"";   // eviction sanity flag, informational (never fails the check)
         attrs += " truncated=\"" + std::string( stats.truncated ? "1" : "0" ) + "\"";
+        attrs += " locks=\"" + std::to_string( doctorEditLockCount( dir ) ) + "\"";   // advisory edit-lock files under locks/ (doctorEditLockCount)
         // F6 (2026-09-05): THE ROW NAMES ITS OWN LIVE-STATE FIELDS. cacheDirLadder() is a per-USER directory
         // every ripwire process writes into, so this scan measures a moving object — two back-to-back runs of
         // a deterministic binary legitimately disagree on blobs=/bytes= and on the flags derived from the same
@@ -663,7 +742,7 @@ int runDoctor( const rw::Config& cfg, const char* argv0 )
         // dependent, so it silently stopped scrubbing once the scan cap spliced blobs_floor= mid-row.
         // Declaring the list HERE makes it a fact of the output that test/lib/doctorvolatile.sh reads; no gate
         // keeps a copy. Removing the fields instead is worse: cache size is this check's whole content.
-        attrs += " volatile=\"blobs,blobs_floor,bytes,many,truncated\"";
+        attrs += " volatile=\"blobs,blobs_floor,bytes,many,truncated,locks\"";
         attrs += doctorCacheDirHint( writable, dir, esc );
         row( "cache-dir", writable, attrs );
     }
@@ -690,6 +769,10 @@ int runDoctor( const rw::Config& cfg, const char* argv0 )
                     // §A10.4: 9-hex-char width, matching the at= convention (gitstamp.h) every other
                     // repo-reading verb uses — this was the tool's one remaining 40-char head=.
                     attrs += " head=\"" + std::string( escapeXml( gitHeadSha( root ).substr( 0, 9 ), esc ) ) + "\"";
+                    if( gitstamp::isShallow( root ) )
+                    {
+                        attrs += " shallow=\"1\"";   // a depth-limited clone: churn everywhere counts only the commits present
+                    }
                 }
             }
         }

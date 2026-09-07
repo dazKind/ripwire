@@ -1984,7 +1984,7 @@ inline void writeStrayContentPage( std::FILE* out, const StrayResult& res, std::
                        "capped; shown plus that number equals the ref's files= total, always. That inner listing is a "
                        "SECONDARY listing (it repeats complete and identical on every page) and is capped by detail, not "
                        "by limit / offset, which page the OUTER ref listing and report their own shown= / capped=. "
-                       "at= is the git commit these numbers were computed at; a trailing +dirty means the working tree "
+                       "at= is the git commit these numbers were computed at; a trailing +shallow means the clone's history is truncated (a depth-limited clone: churn counts only the commits present), and a trailing +dirty means the working tree "
                        "differed from that commit (head= is the same commit, bare sha, kept for compatibility). -->" );
     // §P8: shipped as `head-ref=` while its own --abi sibling (abicheck.h's `<abi head_ref=>`, over the SAME
     // field, reached by the SAME command line) shipped `head_ref=` — the tool's only kebab/snake pair, so a

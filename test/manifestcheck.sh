@@ -32,7 +32,71 @@ text = open(sys.argv[1]).read()
 m = re.search(r'for _g in (.*?); do', text, re.S)
 sys.exit('no loop found') if not m else print(len(m.group(1).split()))
 " "$REGRESSION" )"
+# ── SYNTAX ARM: test/regression.sh must actually PARSE ────────────────────────────────────────────
+# Nothing in this repository syntax-checks the file that drives every gate. Verified empirically:
+# appending an unterminated `if` to regression.sh leaves `bash -n` reporting "syntax error: unexpected
+# end of file" while THIS gate still exits 0 -- and CI agrees, because ci.yml runs pargates.py, which
+# carries skip={"regression.sh"} and only PARSES the file for gate names, never executing it. The only
+# other gate using `bash -n` is hookcheck.sh, which does not target this file.
+#
+# That matters most at a merge. The conflict this file takes is inside the single `for _g in ...; do`
+# line, and a resolution that leaves it unterminated -- or that produces TWO loops -- ships green
+# through the full local suite and through CI. Running the suite is not the same as running the driver.
+if bash -n "$REGRESSION" 2>/dev/null; then
+    printf 'PASS: (SYNTAX) test/regression.sh parses — the driver of every gate is itself syntactically valid\n' 
+else
+    printf 'FAIL: test/regression.sh does not parse:\n'
+    bash -n "$REGRESSION" 2>&1 | sed 's/^/    /'
+    fail=1
+fi
+# CONTROL: corrupt a real copy and re-run the identical check over it. Asserts the injection took
+# before trusting the outcome -- an unmutated copy would pass and prove nothing.
+synTmp="$( mktemp -t manifestcheck_syn.XXXXXX )"
+cp "$REGRESSION" "$synTmp"
+printf '\nif [ 1 = 1 ]; then\n' >> "$synTmp"
+if cmp -s "$REGRESSION" "$synTmp"; then
+    printf 'FAIL: (SYNTAX) mutation control did not take — the copy is unchanged, so it proves nothing\n'; fail=1
+elif bash -n "$synTmp" 2>/dev/null; then
+    printf 'FAIL: (SYNTAX) mutation control is inert: bash -n accepts a deliberately unterminated copy\n'; fail=1
+else
+    printf 'PASS: (SYNTAX) mutation control: the same check rejects a deliberately unterminated copy\n' 
+fi
+rm -f "$synTmp"
+
+# ── TAIL ARM: nothing may sit between the gate list and `do` ────────────────────────────────────────
+# A gate name parked AFTER the loop's `; do` is not in the loop and never runs, yet BOTH existing arms
+# stay green: "every gate FILE is listed" matches the name anywhere in the file, and the count is
+# derived from the same text. It is produced by the obvious merge resolution -- whitespace-splitting
+# the ~12,000-char list line and appending -- which yields
+#     for _g in ... connectjoincheck; do termmargincheck;;
+# `bash -n` clean, exit 0, gate silently disabled. This arm reads the tail of the list line directly:
+# after `; do` there must be nothing. Its mutation control parks a name there and requires a red.
+loopTail="$( awk '/^for _g in /{ sub(/^.*; do/, ""); print; exit }' "$REGRESSION" )"
+if [ -n "$( printf '%s' "$loopTail" | tr -d '[:space:]' )" ]; then
+    printf 'FAIL: text sits after the gate loop'"'"'s "; do" — those names never run: %s\n' "$loopTail"
+    fail=1
+else
+    printf 'PASS: nothing follows the gate loop'"'"'s "; do" — no gate is parked outside the loop\n'
+fi
+tailMut="$( mktemp -t manifestcheck_tail.XXXXXX )"
+awk '/^for _g in /{ print $0 " parkedcheck;"; next } { print }' "$REGRESSION" > "$tailMut"
+tailMutTail="$( awk '/^for _g in /{ sub(/^.*; do/, ""); print; exit }' "$tailMut" )"
+if [ -n "$( printf '%s' "$tailMutTail" | tr -d '[:space:]' )" ]; then
+    printf 'PASS: mutation control: a gate parked after "; do" is caught (saw "%s")\n' "$tailMutTail"
+else
+    printf 'FAIL: mutation control: a gate parked after "; do" was NOT caught — the tail arm is inert\n'
+    fail=1
+fi
+rm -f "$tailMut"
+
 evalsStated="$( grep -oE 'loop in `test/regression\.sh` names [0-9]+' "$EVALS" | head -1 | grep -oE '[0-9]+$' )"
+# DERIVE the line pointer instead of hard-coding it. This message used to end "update
+# docs/EVALS.md:395" as a literal. The sentence it checks has since moved to line 6217, so the gate
+# was sending anyone who tripped it to an unrelated line -- one carrying a published
+# clustered-bootstrap lower bound and a --for file@10 figure. Following that instruction would have
+# edited a measurement and left the real claim stale. A gate whose own pointer goes stale is the
+# same failure family this arm exists to catch, so the pointer is now computed from the match.
+evalsStatedLine="$( grep -nE 'loop in `test/regression\.sh` names [0-9]+' "$EVALS" | head -1 | cut -d: -f1 )"
 if [ -z "$evalsStated" ]; then
     printf 'FAIL: docs/EVALS.md has no "loop in `test/regression.sh` names N" sentence to check (§8)\n'
     fail=1
@@ -42,7 +106,7 @@ elif [ -z "$loopNames" ]; then
 elif [ "$evalsStated" = "$loopNames" ]; then
     printf 'PASS: docs/EVALS.md §8 gate count (%s) matches test/regression.sh loop length (%s)\n' "$evalsStated" "$loopNames"
 else
-    printf 'FAIL: docs/EVALS.md §8 says the loop names %s, but it actually names %s — update docs/EVALS.md:395\n' "$evalsStated" "$loopNames"
+    printf 'FAIL: docs/EVALS.md §8 says the loop names %s, but it actually names %s — update docs/EVALS.md:%s\n' "$evalsStated" "$loopNames" "$evalsStatedLine"
     fail=1
 fi
 
@@ -53,24 +117,102 @@ fi
 # passing manifestcheck reported confidence about a number it had not actually checked. That is
 # METHODOLOGY §3 (a fix that lands on one family member and not its siblings) applied to a gate, and
 # the fix is the §3 fix: enumerate the family, assert over ALL of it. Every "<N> gate scripts" claim
-# in the file is now derived-vs-stated, so a new one added later is covered without editing this gate.
-gateCountClaims="$( grep -nE '[0-9]+ gate scripts' "$EVALS" || true )"
-if [ -z "$gateCountClaims" ]; then
-    printf 'FAIL: docs/EVALS.md has no "<N> gate scripts" claim — the presence guard for this arm found nothing to check\n'
-    fail=1
-else
+# in a scanned file is derived-vs-stated, so a new one added later is covered without editing this gate.
+#
+# WIDENED 2026-09-06 from docs/EVALS.md to the whole FAMILY of files that state this number, for the
+# third instance of exactly the drift the paragraph above describes. README.md and the showcase deck
+# generator both quote the gate count, and neither was scanned: while the loop stood at 542 the deck's
+# own "every claim, and the command that re-derives it" slide said **451**, in a row that NAMES THIS
+# GATE as the command that re-derives it — a claim citing its own instrument, that the instrument had
+# never read. The deck shipped that way through a public PDF. "Enumerate the family, assert over ALL
+# of it" was the right lesson and it was applied to one file's siblings instead of the number's; the
+# family is every prose surface that states the count, not every line of one document.
+#
+# The site list is declared ONCE and drives the scan, exactly as test/deckclaimcheck.sh arm (B) does
+# with its own — a duplicated list is the bug both arms keep being widened to fix. A file that does
+# not exist is skipped; a file that exists and states NO count fails, because "no wrong count" is
+# vacuously true of a document that stopped making the claim, and a claim deleted is a claim drifted.
+gateCountSites=( "docs/EVALS.md" "README.md" "present/deck5_ripwire_build.js" )
+
+scanGateCounts() {                   # $1 = file → prints "line:number" per claim, BOTH spellings
+    # Spelling 1, prose: "<N> gate scripts".
+    # Spelling 2, the deck's stat() call: stat(s, "<N>", "gate scripts named by ...") — the number and
+    # its label are SEPARATE ARGUMENTS, so spelling 1's regex cannot see it. That blind spot was live:
+    # present/deck5_ripwire_build.js states this count three times (711, 735, 974) and only 711 and 974
+    # were ever scanned. A count commit would have moved those two and left 735 behind, on the very
+    # line whose own text claims the number "cannot go stale" because it is gated. It was not gated.
+    { grep -nE '[0-9]+ gate scripts' "$1" | sed -E 's/^([0-9]+):.*[^0-9]([0-9]+) gate scripts.*/\1:\2/'
+      grep -nE '"[0-9]+"[[:space:]]*,[[:space:]]*"gate scripts' "$1" | sed -E 's/^([0-9]+):.*"([0-9]+)"[[:space:]]*,[[:space:]]*"gate scripts.*/\1:\2/'
+    } | sort -t: -k1,1n -u || true
+}
+
+for site in "${gateCountSites[@]}"; do
+    sitePath="$ROOT/$site"
+    [ -f "$sitePath" ] || continue
+    gateCountClaims="$( scanGateCounts "$sitePath" )"
+    if [ -z "$gateCountClaims" ]; then
+        printf 'FAIL: %s has no "<N> gate scripts" claim — the presence guard for this arm found nothing to check\n' "$site"
+        fail=1
+        continue
+    fi
     while IFS= read -r claim; do
+        [ -z "$claim" ] && continue
         claimLine="${claim%%:*}"
-        claimNum="$( printf '%s' "$claim" | grep -oE '[0-9]+ gate scripts' | grep -oE '^[0-9]+' )"
+        claimNum="${claim##*:}"
         if [ "$claimNum" = "$loopNames" ]; then
-            printf 'PASS: docs/EVALS.md:%s gate count (%s) matches the loop\n' "$claimLine" "$claimNum"
+            printf 'PASS: %s:%s gate count (%s) matches the loop\n' "$site" "$claimLine" "$claimNum"
         else
-            printf 'FAIL: docs/EVALS.md:%s says %s gate scripts, but the loop names %s\n' "$claimLine" "$claimNum" "$loopNames"
+            printf 'FAIL: %s:%s says %s gate scripts, but the loop names %s\n' "$site" "$claimLine" "$claimNum" "$loopNames"
             fail=1
         fi
     done <<EOF
 $gateCountClaims
 EOF
+done
+
+# MUTATION CONTROL for the arm above. Every site passing proves only that some numbers were read and
+# compared equal — never that a WRONG one would have been seen. The deck is the mutated site on
+# purpose: it is the one this widening was written for, and the one whose scan had never run. A copy
+# with the count deliberately shifted must be extracted, must actually differ from the derived loop
+# length, and must be seen to differ by the SAME comparison the live arm uses.
+mutSrc="$ROOT/present/deck5_ripwire_build.js"
+if [ -f "$mutSrc" ]; then
+    mutTmp="$( mktemp -t manifestcheck_mut.XXXXXX )"
+    trap 'rm -f "$mutTmp"' EXIT
+    wrongCount=$(( loopNames + 7 ))
+    # Mutate BOTH spellings. The old control rewrote only "<N> gate scripts", so it never exercised
+    # the stat(s, "<N>", "gate scripts …") path at all — a control that cannot reach the code it
+    # guards is the inert shape this whole round has been closing.
+    # Mutate from whatever the deck CURRENTLY states, not from the loop's length. The two are equal
+    # on a healthy tree but deliberately differ mid-round (the count is set once at an integration
+    # tip), and a control keyed to the loop silently injects nothing in exactly that window — it
+    # would have reported a vacuous pass precisely when the arm most needed proving.
+    cp "$mutSrc" "$mutTmp"
+    for _cur in $( scanGateCounts "$mutSrc" | awk -F: '{print $2}' | sort -u ); do
+        sed -E -i.bak -e "s/${_cur} gate scripts/${wrongCount} gate scripts/g" \
+                      -e "s/\"${_cur}\"([[:space:]]*,[[:space:]]*\"gate scripts)/\"${wrongCount}\"\1/g" \
+                      "$mutTmp"
+        rm -f "${mutTmp}.bak"
+    done
+    mutClaims="$( scanGateCounts "$mutTmp" )"
+    mutCount="$( printf '%s\n' "$mutClaims" | grep -c . )"
+    mutAgreeing="$( printf '%s\n' "$mutClaims" | awk -F: -v L="$loopNames" '$2==L' | grep -c . )"
+    mutSpelling2="$( printf '%s\n' "$mutClaims" | awk -F: -v W="$wrongCount" '$2==W' | grep -c . )"
+    if [ -z "$mutClaims" ]; then
+        printf 'FAIL: mutation control: could not re-extract a gate count from the mutated deck copy at all\n'
+        fail=1
+    elif [ "$mutCount" -lt 3 ]; then
+        printf 'FAIL: mutation control: the deck states this count at 3 sites but the scan saw %s — a spelling is unscanned\n' "$mutCount"
+        fail=1
+    elif [ "$mutAgreeing" -ne 0 ]; then
+        printf 'FAIL: mutation control: %s mutated site(s) still read %s — the injection did not take, the control is vacuous\n' "$mutAgreeing" "$loopNames"
+        fail=1
+    elif [ "$mutSpelling2" -ne "$mutCount" ]; then
+        printf 'FAIL: mutation control: only %s of %s mutated sites carry the injected value\n' "$mutSpelling2" "$mutCount"
+        fail=1
+    else
+        printf 'PASS: mutation control: all %s fabricated deck gate counts (%s) are seen to disagree with the loop (%s) — both spellings scanned\n' "$mutCount" "$wrongCount" "$loopNames"
+    fi
 fi
 
 # ── I1 (capture-audit verify-wave1 2026-09-04): a gate that CALLS a shell function ABOVE its definition is
@@ -155,6 +297,28 @@ for name in scripts:
             print( "test/%s: %s used at line %d, defined at line %d" % ( name, fname, k + 1, defAt + 1 ) )
 PY
 )"
+# I2 — a gate that CALLS a reporting helper it never DEFINES. The arm above catches use-before-
+# definition; it cannot see use-without-definition, and the consequence is identical and quieter: the
+# call expands to nothing, bash prints "ok: command not found" on stderr, the arm produces no PASS and
+# no FAIL, and the gate exits 0 having silently skipped a check. I did exactly this in this file an
+# hour ago -- two SYNTAX arms called `ok`, which manifestcheck.sh does not define, and the run stayed
+# green. Restricted to the known reporting-helper names, because a gate legitimately calls hundreds of
+# real commands and only these four decide whether a result is reported at all.
+undefHelper="$( for _f in "$ROOT"/test/*.sh; do
+    for _h in ok no pass warn; do
+        grep -qE "^[[:space:]]*${_h}[[:space:]]+[\"']" "$_f" 2>/dev/null || continue
+        grep -qE "^[[:space:]]*(function[[:space:]]+)?${_h}[[:space:]]*\(\)" "$_f" 2>/dev/null && continue
+        printf '%s calls %s but never defines it\n' "$( basename "$_f" )" "$_h"
+    done
+done )"
+if [ -z "$undefHelper" ]; then
+    printf 'PASS: no gate calls a reporting helper it never defines\n'
+else
+    printf 'FAIL: a gate calls a reporting helper it never defines (the arm prints nothing and the gate still exits 0):\n'
+    printf '%s\n' "$undefHelper" | sed 's/^/        /'
+    fail=1
+fi
+
 if [ -z "$usedBeforeDef" ]; then
     printf 'PASS: no gate calls a shell function above its definition\n'
 else

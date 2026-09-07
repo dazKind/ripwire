@@ -807,7 +807,7 @@ inline void writeMergeScout( std::FILE* out, const ScoutResult& result )
                        "anchoring=file-level is a whole-file fallback for a file with zero real-body symbols (no "
                        "tree-sitter symbol spans it) — counted and conflict-checked like any other row, just not "
                        "attributed to a symbol inside it. at= is the git commit these numbers were computed at; a "
-                       "trailing +dirty means the working tree differed from that commit (head= is the same commit, "
+                       "trailing +shallow means the clone's history is truncated (a depth-limited clone: churn counts only the commits present), and a trailing +dirty means the working tree differed from that commit (head= is the same commit, "
                        "bare sha, kept for compatibility). -->", result.arms.size() );
     // §P8: head= was a FULL 40 here vs 9 hex in <abi>/<stray-content>/<landing-plan>/<history> — one name,
     // two widths. Aligned to the majority; nothing reads this one. (`base=` on the <arm> rows is still full

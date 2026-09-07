@@ -1637,6 +1637,15 @@ inline HashMap<std::string, FileFacts> loadCache( const std::string& path, std::
     const CacheFrame frame = openCacheFrame( path, captureValueUses );
     if( !frame.ok )
     {
+        // 2026-09-06 stranger audit: every reject here self-healed to a full reparse with NO signal a Release
+        // binary keeps (the debug-only alert compiles out under NDEBUG) — a torn blob, an older binary's blob, a
+        // directory passed as --cache: all byte-identical to a healthy run, just slower, every time. The
+        // ordinary cold-start miss (absent) stays silent; anything else says what it found, once per run.
+        if( frame.reason != CacheReject::Absent )
+        {
+            std::fprintf( stderr, "ripwire: cache %s: %s — not used; this run parses from source and rewrites it\n",
+                          path.c_str(), cacheRejectName( frame.reason ) );
+        }
         return out;
     }
     stats.blobWriteNs = frame.mtimeNs;
@@ -2163,6 +2172,8 @@ inline void saveCache( const std::string& path, std::string_view rootDir, const 
     if( !fp )
     {
         DEGRADED_PATH_ALERT( "ingest: saveCache could not open temp file for write — cache left unchanged" );
+        std::fprintf( stderr, "ripwire: cache %s: cannot write (%s) — every run parses from source until this is fixed\n",
+                      path.c_str(), std::strerror( errno ) );   // 2026-09-06: Release kept no signal for this
         return;
     }
     const std::size_t wrote = std::fwrite( w.b.data(), 1, w.b.size(), fp );
@@ -2171,12 +2182,15 @@ inline void saveCache( const std::string& path, std::string_view rootDir, const 
     {
         std::remove( tmp.c_str() );   // never rename a short/torn write over a good cache
         DEGRADED_PATH_ALERT( "ingest: saveCache write failed (short write or fclose error) — old cache preserved" );
+        std::fprintf( stderr, "ripwire: cache %s: write failed (short write; disk full?) — old cache kept, this run was parsed from source\n", path.c_str() );
         return;
     }
     if( std::rename( tmp.c_str(), path.c_str() ) != 0 )
     {
         std::remove( tmp.c_str() );   // clean up on failure
         DEGRADED_PATH_ALERT( "ingest: saveCache rename(tmp -> cache) failed — old cache preserved" );
+        std::fprintf( stderr, "ripwire: cache %s: cannot replace (%s) — old cache kept, this run was parsed from source\n",
+                      path.c_str(), std::strerror( errno ) );
         return;
     }
 
@@ -2190,3 +2204,5 @@ inline void saveCache( const std::string& path, std::string_view rootDir, const 
 }   // namespace — ingest_cache.h section of ingest.cpp
 
 }   // namespace rw
+#include <cerrno>    // errno — the cache save-failure notices (2026-09-06)
+#include <cstring>   // std::strerror — same

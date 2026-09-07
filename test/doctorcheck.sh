@@ -72,6 +72,12 @@ echo "happy-path output:"; echo "$OUT"; echo "(exit=$RC)"; echo
 
 [ "$RC" -eq 0 ] && ok "happy path exits 0" || no "happy path exit code was $RC, expected 0"
 
+# 2026-09-06: the fixture's one edit-lock file (locks/0b/ripwire-edit-test.lock) is counted by the cache-dir
+# row's locks= — the blob scan still never enters locks/ (blobs= stays 2), the count is a separate walk.
+echo "$OUT" | grep -oE '<c n="cache-dir"[^<]*/>' | grep -q 'locks="1"' \
+    && ok "cache-dir row counts the fixture's one edit-lock file (locks=\"1\")" \
+    || no "cache-dir row's locks= is not 1: $( echo "$OUT" | grep -oE '<c n="cache-dir"[^<]*/>' )"
+
 # checks= is DERIVED from the rows the run actually emitted, not pinned at a literal: the literal was 6,
 # then 7 when the index-cache row landed, and a pinned count only ever measures how recently someone edited
 # this line. What is worth asserting is the INVARIANT — the denominator equals the row population — plus
@@ -171,22 +177,69 @@ echo "$COUT" | grep -q 'copied="1"' \
     && ok "copied binary -> copied=\"1\" attribute present" \
     || no "copied binary missing copied=\"1\" attribute"
 
-# ── (F) genuine-stale binary: mtime forced apart (size still equal) -> still a real mismatch, must
-#     stay ok="0" with no copied="1" (the fallback must not paper over an actually-stale shadow). ──
+# ── (F) genuine-stale binary: same SIZE, different CONTENT (one byte flipped), older mtime -> a real
+#     mismatch, must stay ok="0" with no copied="1". Until 2026-09-06 this fixture was the same bytes with an
+#     older mtime — i.e. the false positive the check produced on a real machine (the same 0.4.0 release
+#     installed twice came out STALE), pinned as the expected behaviour. A fixture must differ in the fact
+#     the check claims to measure. ──
 STALEDIR="$TMP/staledir"; mkdir -p "$STALEDIR"
 cp -p "$BIN" "$STALEDIR/ripwire"; chmod +x "$STALEDIR/ripwire"
-touch -t 202001010000 "$STALEDIR/ripwire"   # force a different mtime; size stays identical
+# The flipped byte is DERIVED from the byte already there (XOR 0xFF), not a fixed literal: a fixed 'X' at a
+# fixed offset is a no-op on any binary that already carries 0x58 there — the 2026-09-07 merge build did, so
+# the fixture was byte-identical to $BIN and this arm reported a genuine same_bytes="1" as five failures of
+# the check under test. The cmp guard turns that vacuity into its own FAIL instead.
+staleByte="$( dd if="$STALEDIR/ripwire" bs=1 skip=100000 count=1 2>/dev/null | od -An -tu1 | tr -d ' ' )"
+printf "$( printf '\\%03o' $(( ${staleByte:-0} ^ 0xFF )) )" | dd of="$STALEDIR/ripwire" bs=1 seek=100000 count=1 conv=notrunc 2>/dev/null   # one byte differs; size identical
+cmp -s "$BIN" "$STALEDIR/ripwire" \
+    && no "genuine-stale fixture is byte-identical to \$BIN — the flip did not flip, so (F) below asserts nothing" \
+    || ok "genuine-stale fixture differs from \$BIN in content (same size, one byte flipped)"
+touch -t 202001010000 "$STALEDIR/ripwire"   # and an older mtime, so the hint names the right side
 STALECACHE="$TMP/stalecache"; mkdir -p "$STALECACHE"
 SOUT="$( PATH="$STALEDIR:$PATH" TMPDIR="$STALECACHE" "$BIN" "$REPO" --doctor --no-cache 2>/dev/null )"
 
 echo "genuine-stale output:"; echo "$SOUT"; echo
 
 echo "$SOUT" | grep -q '<c n="binary-path" ok="0"' \
-    && ok "genuine-stale binary (mtime differs) -> binary-path row ok=\"0\"" \
+    && ok "genuine-stale binary (contents differ) -> binary-path row ok=\"0\"" \
     || no "genuine-stale binary did not flag ok=\"0\""
-echo "$SOUT" | grep -q 'copied="1"' \
+echo "$SOUT" | grep -oE '<c n="binary-path"[^<]*/>' | grep -q 'copied="1"' \
     && no "genuine-stale binary wrongly carries copied=\"1\"" \
-    || ok "genuine-stale binary carries no copied=\"1\" (fallback did not paper over it)"
+    || ok "genuine-stale binary carries no copied=\"1\" (content compare did not paper over it)"
+echo "$SOUT" | grep -oE '<c n="binary-path"[^<]*/>' | grep -q 'same_bytes="0"' \
+    && ok "genuine-stale binary -> same_bytes=\"0\"" \
+    || no "genuine-stale binary: same_bytes=\"0\" missing"
+
+# ── (F2) same BYTES, older mtime (the same release installed twice; every install is a fresh rename):
+#     ok="1" copied="1" same_bytes="1", no hint. This is the 2026-09-06 false positive, now the control. ──
+TWICEDIR="$TMP/twicedir"; mkdir -p "$TWICEDIR"
+cp -p "$BIN" "$TWICEDIR/ripwire"; chmod +x "$TWICEDIR/ripwire"
+touch -t 202001010000 "$TWICEDIR/ripwire"
+TWICECACHE="$TMP/twicecache"; mkdir -p "$TWICECACHE"
+TOUT="$( PATH="$TWICEDIR:$PATH" TMPDIR="$TWICECACHE" "$BIN" "$REPO" --doctor --no-cache 2>/dev/null )"
+TROW="$( echo "$TOUT" | grep -oE '<c n="binary-path"[^<]*/>' )"
+echo "$TROW" | grep -q ' ok="1"' && echo "$TROW" | grep -q 'same_bytes="1"' && echo "$TROW" | grep -q 'copied="1"' \
+    && ok "(F2) same bytes, older mtime -> ok=\"1\" same_bytes=\"1\" copied=\"1\" (mtime is not content)" \
+    || no "(F2) same bytes, older mtime still flagged stale: $TROW"
+echo "$TROW" | grep -q 'hint=' \
+    && no "(F2) same-bytes row wrongly carries a hint" \
+    || ok "(F2) same-bytes row carries no hint"
+
+# ── (G) NOT on PATH at all — the state every fresh install is in until the user adds ~/.local/bin, and the
+#     state in which a stranger runs this binary by absolute path to ask what is wrong. Used to be ok="1"
+#     (passed=7/7) with `ripwire` a "command not found" at the prompt. Fails the row, names the fix. ──
+NOPATHCACHE="$TMP/nopathcache"; mkdir -p "$NOPATHCACHE"
+GOUT="$( PATH="/usr/bin:/bin" TMPDIR="$NOPATHCACHE" "$BIN" "$REPO" --doctor --no-cache 2>/dev/null )"
+GROW="$( echo "$GOUT" | grep -oE '<c n="binary-path"[^<]*/>' )"
+echo "$GROW" | grep -q ' ok="0"' && echo "$GROW" | grep -q 'on_path="0"' \
+    && ok "(G) no ripwire on PATH -> binary-path row ok=\"0\" on_path=\"0\"" \
+    || no "(G) no ripwire on PATH still passes: $GROW"
+echo "$GROW" | grep -q 'hint="NOT ON PATH:.*export PATH=' \
+    && ok "(G) not-on-PATH row's hint carries the export line" \
+    || no "(G) not-on-PATH row has no export line in its hint: $GROW"
+echo "$GOUT" | grep -q '<doctor checks="[0-9]*" passed="[0-9]*"' \
+    && [ "$( echo "$GOUT" | grep -oE 'passed="[0-9]+"' | grep -oE '[0-9]+' )" -lt "$( echo "$GOUT" | grep -oE 'checks="[0-9]+"' | grep -oE '[0-9]+' )" ] \
+    && ok "(G) passed= is below checks= when ripwire is not on PATH" \
+    || no "(G) passed= still equals checks= with ripwire off PATH"
 
 # §P11 doctor item: binary-path's ok="0" row names which of self=/which= is the STALE (older) one.
 echo "$SOUT" | grep -oE '<c n="binary-path" ok="0"[^<]*/>' | grep -q 'hint="STALE:' \

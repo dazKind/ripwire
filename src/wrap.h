@@ -10,6 +10,7 @@
 // CRITICAL → stderr warning + return 1 (unless --force in argv). WARN → print + continue.
 
 #include "mcp.h"       // kMcpVerbTable / kMcpVerbCount — the single source of truth for the MCP verb list (A4-S2)
+#include <unistd.h>   // wrapCommandToken (2026-09-06)
 #include "skillscan.h"
 
 #include <cstdio>
@@ -221,15 +222,55 @@ inline std::string wrapTomlString( const std::string_view value )
 }
 
 // emit a standard JSON MCP-server stanza for the editors that share that shape
-inline void wrapMcpJson( const char* configPath )
+// 2026-09-06 (stranger audit): every recipe spelled the server command as the bare word `ripwire`. The
+// installer's own last line is "<dir> is not on PATH — add it", so a new user who then ran this binary by
+// absolute path got a recipe that registers a server their agent cannot start, silently. When NOTHING on
+// PATH is named ripwire, the recipe names this binary by its absolute path instead. When something is, the
+// bare word stays — --doctor's binary-path row is the place a stale PATH copy is judged, not here — and the
+// gates that pin the recipe's shape run with a PATH copy present.
+inline std::string wrapCommandToken( const std::string_view executablePath )
 {
+    namespace fs = std::filesystem;
+    const char* pathEnv = std::getenv( "PATH" );
+    std::string_view path( pathEnv ? pathEnv : "" );
+    while( !path.empty() )
+    {
+        const std::size_t    colon = path.find( ':' );
+        const std::string_view dir = path.substr( 0, colon );
+        path = ( colon == std::string_view::npos ) ? std::string_view() : path.substr( colon + 1 );
+        if( dir.empty() )
+        {
+            continue;
+        }
+        std::error_code ec;
+        const fs::path  candidate = fs::path( std::string( dir ) ) / "ripwire";
+        if( fs::is_regular_file( candidate, ec ) && !ec && ::access( candidate.c_str(), X_OK ) == 0 )
+        {
+            return "ripwire";
+        }
+    }
+    return executablePath.empty() ? std::string( "ripwire" ) : std::string( executablePath );
+}
+
+inline void wrapPrintPathNote( const std::string& token )
+{
+    if( token != "ripwire" )
+    {
+        std::printf( "# NOTE: nothing on PATH is named ripwire right now, so the command below is this binary's absolute path;\n"
+                     "#       put its directory on PATH (the installer printed the export line) and the bare word works too.\n" );
+    }
+}
+
+inline void wrapMcpJson( const char* configPath, const std::string& token )
+{
+    wrapPrintPathNote( token );
     std::printf(
         "# ripwire -> add to %s\n"
         "{\n"
         "  \"mcpServers\": {\n"
-        "    \"ripwire\": { \"command\": \"ripwire\", \"args\": [\"--mcp\"] }\n"
+        "    \"ripwire\": { \"command\": \"%s\", \"args\": [\"--mcp\"] }\n"
         "  }\n"
-        "}\n", configPath );
+        "}\n", configPath, token.c_str() );
 }
 
 // opencode's config is a DIFFERENT shape, not a different path: the top-level key is `mcp` (not
@@ -239,15 +280,15 @@ inline void wrapMcpJson( const char* configPath )
 // happily and then ignores it. Callers print their own "add to <path>" guidance, so this emits the
 // object alone. Keys are held to McpLocalConfig's six (the published schema sets
 // additionalProperties:false); test/opencodewrapcheck.sh checks this against the pinned copy.
-inline void wrapMcpJsonOpencode()
+inline void wrapMcpJsonOpencode( const std::string& token )
 {
     std::printf(
         "{\n"
         "  \"$schema\": \"https://opencode.ai/config.json\",\n"
         "  \"mcp\": {\n"
-        "    \"ripwire\": { \"type\": \"local\", \"command\": [\"ripwire\", \"--mcp\"] }\n"
+        "    \"ripwire\": { \"type\": \"local\", \"command\": [\"%s\", \"--mcp\"] }\n"
         "  }\n"
-        "}\n" );
+        "}\n", token.c_str() );
 }
 
 // Agent configuration: name, config directory path (using ~ for home), and a lambda to
@@ -378,12 +419,14 @@ inline int wrapScanSkillDir( const std::string& dir, bool force ) noexcept
 inline void wrapEmitAgent( const std::string_view agent, const std::vector<std::string>& verbLines,
                            const std::string_view executablePath ) noexcept
 {
+    const std::string token = wrapCommandToken( executablePath );   // 2026-09-06: "ripwire", or this binary's absolute path when PATH has none
     if( agent == "claude" )
     {
+        std::printf( "# ripwire -> Claude Code (MCP — deterministic, no LLM, no embeddings)\n" );
+        wrapPrintPathNote( token );
         std::printf(
-            "# ripwire -> Claude Code (MCP — deterministic, no LLM, no embeddings)\n"
-            "claude mcp add ripwire -- ripwire --mcp\n"
-            "# verbs the agent can then call mid-task (%zu total):\n", kMcpVerbCount );
+            "claude mcp add ripwire -- %s --mcp\n"
+            "# verbs the agent can then call mid-task (%zu total):\n", token.c_str(), kMcpVerbCount );
         for( const std::string& line : verbLines )
         {
             std::printf( "%s\n", line.c_str() );
@@ -392,15 +435,15 @@ inline void wrapEmitAgent( const std::string_view agent, const std::vector<std::
     }
     else if( agent == "cursor" )
     {
-        wrapMcpJson( ".cursor/mcp.json  (project)  or  ~/.cursor/mcp.json  (global)" );
+        wrapMcpJson( ".cursor/mcp.json  (project)  or  ~/.cursor/mcp.json  (global)", token );
     }
     else if( agent == "windsurf" )
     {
-        wrapMcpJson( "~/.codeium/windsurf/mcp_config.json" );
+        wrapMcpJson( "~/.codeium/windsurf/mcp_config.json", token );
     }
     else if( agent == "gemini" )
     {
-        wrapMcpJson( "~/.gemini/settings.json" );
+        wrapMcpJson( "~/.gemini/settings.json", token );
     }
     else if( agent == "codex" )
     {
@@ -432,7 +475,7 @@ inline void wrapEmitAgent( const std::string_view agent, const std::vector<std::
             "# opencode.json (project) or ~/.config/opencode/opencode.json (global; the two are\n"
             "# merged per-key and the project file wins). The key is \"mcp\" — the \"mcpServers\" shape\n"
             "# other clients use parses fine here and is then silently ignored:\n" );
-        wrapMcpJsonOpencode();
+        wrapMcpJsonOpencode( token );
     }
     else if( agent == "aider" )
     {
@@ -531,7 +574,7 @@ inline int runWrap( int argc, char** argv, const std::string_view executablePath
 
     std::fprintf( stderr, "ripwire wrap: unknown agent '%.*s'\n", int( agent.size() ), agent.data() );
     wrapList( stderr );
-    wrapMcpJson( "your client's MCP config (generic stanza)" );   // don't leave them stuck
+    wrapMcpJson( "your client's MCP config (generic stanza)", wrapCommandToken( executablePath ) );   // don't leave them stuck
     return 2;
 }
 

@@ -360,7 +360,7 @@ inline constexpr const char* kDmmLegend =
     "size_metric=physical-loc: volume is the definition's PHYSICAL line span, where the reference implementation "
     "uses non-comment non-blank lines, so a heavily commented unit crosses the size threshold here earlier "
     "at= is the git commit this comparison RAN at (HEAD, not base/target — those name what was compared); a "
-    "trailing +dirty means the working tree differed from that commit "
+    "trailing +shallow means the clone's history is truncated (a depth-limited clone: churn counts only the commits present), and a trailing +dirty means the working tree differed from that commit "
     "available=0 when no score could be produced at all "
     // P8 (L7): the thresholds are on the root, not only in this prose
     "low_loc=/low_cx=/low_params= are the low-risk ceilings a unit is judged against (lines / cyclomatic complexity / parameters). "

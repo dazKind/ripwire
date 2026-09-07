@@ -156,6 +156,7 @@ struct DeltaBasis
     gtl::btree_map<std::string, rw::quality::AckRecord> acks;
     rw::quality::IdentityHealing                        healing;
     std::size_t                                         registerMacroExcluded = 0;   // P2.2: disclosed dead-code exemption count
+    std::size_t acksBadLines = 0;   // 2026-09-06: .ripwire_quality_acks lines skipped as unparseable (disclosed on the root)
 };
 
 // Returns an EXIT CODE when there is nothing to compare against (already reported), nullopt when `out` holds
@@ -233,7 +234,13 @@ std::optional<int> resolveDeltaBasis( const MainDispatch& d, const std::string& 
             return 1;
         }
         out.baseSel.snapshot = std::move( headSnap );
-        if( !out.baseSel.isSidecarStale() )
+        if( out.baseSel.sidecarUnreadable )
+        {
+            // 2026-09-06 stranger audit: this used to print "no <file>" about a file sitting on disk.
+            std::fprintf( stderr, "ripwire: %s exists but is not a readable baseline (unrecognizable, or a pre-Q1 sidecar without per-symbol loc records) — IGNORED; "
+                                  "auto-comparing the working tree vs git HEAD; re-pin it with --quality-baseline\n", baselineFile.c_str() );
+        }
+        else if( !out.baseSel.isSidecarStale() )
         { // the stale/healed case is silent by design — only the true "never baselined" case is informative
             std::fprintf( stderr, "ripwire: no %s — auto-comparing the working tree vs git HEAD (commit the baseline with --quality-baseline to pin it)\n",
                           baselineFile.c_str() );
@@ -241,7 +248,7 @@ std::optional<int> resolveDeltaBasis( const MainDispatch& d, const std::string& 
     }
     // R1 IDENTITY — heal both sidecars into the current tree's identity BEFORE the delta is taken against
     // them. One root here: the judged tree and the git record are the same directory in this form.
-    out.acks    = quality::readAckRecords( quality::acksPath( root ) );
+    out.acks    = quality::readAckRecords( quality::acksPath( root ), out.acksBadLines );
     out.healing = quality::healIdentity( out.baseSel.snapshot, out.acks, d.ing, d.g,
                                          std::string( cfg.rootPath ), root, cfg.qualityAck );
     out.regs = quality::computeDelta( d.ing, d.g, out.baseSel.snapshot, cfg.rootPath, cfg.excludes, cfg.maxFileBytes, &out.registerMacroExcluded );
@@ -519,6 +526,12 @@ inline constexpr const char* kQdBaseHeadRemoved =
     "baseline=\"git-HEAD (stale sidecar removed)\" means a sidecar existed, was pinned at a DIFFERENT sha, "
     "and this run DELETED it from your working tree before falling back to the HEAD tree (re-pin with "
     "quality-baseline) — so anything already committed cannot appear. ";
+inline constexpr const char* kQdBaseHeadUnreadable =
+    "baseline=\"git-HEAD (sidecar unreadable)\" means a .ripwire_quality_baseline EXISTS but could not be read as one "
+    "(no recognizable structure, or a pre-Q1 sidecar without per-symbol loc records), so it was IGNORED and the "
+    "working tree was compared against the HEAD tree — re-pin it with quality-baseline. baseline_bad_lines= and "
+    "acks_bad_lines=, when present, count sidecar lines of a known kind whose payload did not parse and were "
+    "skipped (absent means none). ";
 inline constexpr const char* kQdBaseHeadIgnored =
     "baseline=\"git-HEAD (stale sidecar ignored)\" is the same staleness verdict, but the file was left on "
     "disk (the read-only MCP arm, or an unlink that failed), and the comparison fell back to the HEAD "
@@ -703,6 +716,7 @@ inline void emitQualityDeltaLegend( const QualityDeltaLegendParts& p )
     else if( p.marker == "ref-pair"                         ) { std::fputs( kQdBaseRefPair,     stdout ); }
     else if( p.marker == "git-HEAD (stale sidecar removed)" ) { std::fputs( kQdBaseHeadRemoved, stdout ); }
     else if( p.marker == "git-HEAD (stale sidecar ignored)" ) { std::fputs( kQdBaseHeadIgnored, stdout ); }
+    else if( p.marker == "git-HEAD (sidecar unreadable)"     ) { std::fputs( kQdBaseHeadUnreadable, stdout ); }
     else                                                      { std::fputs( kQdBaseHead,        stdout ); }
     if( p.baselineAbsorbed > 0 )
     {
@@ -1386,15 +1400,19 @@ std::optional<int> runQualityDelta( const MainDispatch& d )
                                   basis.registerMacroExcluded > 0, configDiag.total() > 0, regs, outOfScope,
                                   scope.active() || !foreignAcks.empty(), !foreignAcks.empty(), baselineAbsorbed } );
         const char* baseMarker = baseSel.marker;    // R3: ditto — one seam decides staleness AND names it
+        // 2026-09-06: what the sidecar readers skipped, on the root (absent means none) — see kQdBaseHeadUnreadable
+        std::string sidecarHealthAttrs;
+        if( baseSel.sidecarBadLines > 0 ) { sidecarHealthAttrs += " baseline_bad_lines=\"" + std::to_string( baseSel.sidecarBadLines ) + "\""; }
+        if( basis.acksBadLines > 0 )      { sidecarHealthAttrs += " acks_bad_lines=\"" + std::to_string( basis.acksBadLines ) + "\""; }
         // at= anchors this regression list to the commit (+dirty state) it was computed against.
-        std::printf( "<quality-delta baseline=\"%s\" regressions=\"%zu\" minor=\"%zu\" acked=\"%zu\" stale=\"%zu\" preexisting-worse=\"%zu\" new-symbol=\"%zu\" gating=\"%zu\" register-macro-excluded=\"%zu\"%s%s%s%s%s%s>",
+        std::printf( "<quality-delta baseline=\"%s\" regressions=\"%zu\" minor=\"%zu\" acked=\"%zu\" stale=\"%zu\" preexisting-worse=\"%zu\" new-symbol=\"%zu\" gating=\"%zu\" register-macro-excluded=\"%zu\"%s%s%s%s%s%s%s>",
                      baseMarker, regs.size(), minorCount, ackedCount, staleAcks.size(), preexistingCount, newSymbolCount, gatingCount, basis.registerMacroExcluded,
                      // R-I: at= is OMITTED for the ref-pair form rather than stamped with the working tree's
                      // sha, which would anchor the list to a commit it was not computed from. base_ref= and
                      // target_ref= are the anchor there, and they carry FULL shas because a wave measurement
                      // gets quoted into handoffs where a 9-char prefix is one collision from unverifiable.
                      refPair ? "" : gitstamp::atAttr( root ).c_str(), refs.attrs.c_str(), identityAttrs.c_str(),
-                     scopeAttrs.c_str(), configWarnAttr.c_str(), baselineAbsorbedAttr.c_str() );
+                     scopeAttrs.c_str(), configWarnAttr.c_str(), baselineAbsorbedAttr.c_str(), sidecarHealthAttrs.c_str() );
         // P1: ONE row emitter for both halves of the scope partition — a disclosed row carries the identical
         // attribute set, because nothing about a finding changes by belonging to someone else. `gatingAllowed`
         // is the one difference: an out-of-scope row is not what the exit code fires on, and a gating

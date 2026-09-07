@@ -405,7 +405,14 @@ inline ArchRules parseArchRules( const std::string& path )
                 // so it stays a soft degrade rather than rejecting the whole file. The TO regex is compiled
                 // per-edge after backref substitution (so it is validated there too).
                 try { pr.fromRe = std::regex( fromRe, std::regex::ECMAScript ); }
-                catch( const std::regex_error& ) { pr.bad = true; DEGRADED_PATH_ALERT( "arch: malformed FROM path-regex — rule skipped" ); }
+                catch( const std::regex_error& )
+                {
+                    // 2026-09-06 stranger audit: this used to keep the rule (pathRules= counted it) and skip it,
+                    // so one stray paren turned a CI gate's exit 2 into exit 0 with violations="0". Same D9
+                    // discipline as every other malformed line: refuse the whole file, name the line.
+                    ok = badLine( lineNo, "FROM path-regex does not compile as ECMAScript — check parentheses and escapes (want e.g.: deny path src/a\\.cpp -> src/b\\.cpp)" );
+                    break;
+                }
                 r.pathRules.push_back( std::move( pr ) );
             }
             else                                               // layer-name rule: `allow|deny FROM -> TO`

@@ -1,5 +1,6 @@
 ---
 name: ripwire-opt-remarks
+audience: contributor
 description: >
   Triage clang optimization remarks (-Rpass / -Rpass-missed / -fsave-optimization-record) while editing
   ripwire's own C++. Use when a compiler remark says loop not vectorized, will not be inlined, load

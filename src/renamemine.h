@@ -678,7 +678,7 @@ inline constexpr const char* kNamingCalibrationLegend =
     "drop_old_skipped=candidates dropped because the lens would skip the old spelling, so no rule could ever have fired on it "
     "truncated=1 when a walk bound was hit, which makes candidates= a FLOOR "
     "probed=0 when there is no history to mine; r= says why "
-    "the root's own at= is the git commit these numbers were computed at (a trailing +dirty means the working "
+    "the root's own at= is the git commit these numbers were computed at (a trailing +shallow means the clone's history is truncated (a depth-limited clone: churn counts only the commits present), and a trailing +dirty means the working "
     "tree differed from that commit); a p row's at= below is unrelated — a path:line location, not a commit "
     "r rows: n=rule name old=pairs where the rule fired on the ABANDONED spelling new=pairs where it fired on "
     "the CHOSEN spelling fired=old+new proxy=old/fired, the crude precision proxy, absent when fired=0 "

@@ -79,6 +79,48 @@ else
     ok "arm 2 — no absolute /Users/ paths"
 fi
 
+# arm 2b — THE BINARY POPULATION. Arm 2 sweeps TEXT. Three tracked files are containers it cannot
+# read, and two of them are rebuilt by a generator that runs on a contributor's machine — which is
+# exactly the path this class of leak travels:
+#
+#     present/ripwire-showcase.pdf      built from deck5_ripwire_build.js on someone's machine
+#     present/ripwire-showcase.pptx     same
+#     docs/assets/showcase-preview.png  a render of those slides
+#
+# The mechanism is upstream of all of them: ripwire ECHOES ITS ROOT verbatim into the XML header
+# (`root="/Users/…"`, 45 bytes and ~18 est_tokens), so any artifact built by running it with an
+# absolute root carries the operator's filesystem layout. Three separate instances of this landed or
+# nearly landed in one day — the README figures, the head-to-head bench harness, and this.
+#
+# This arm EXTRACTS text and greps that, rather than grepping the container. A container scan is
+# shape 1 from CONTRIBUTING §2: a check examining the wrong population. Note the honest limit — for
+# the PNG there is no cheap extraction, because a leak rendered as PIXELS is invisible to every text
+# tool. That file's control is the crop, not this gate, and saying so here is the disclosure.
+for _bin in present/ripwire-showcase.pdf present/ripwire-showcase.pptx; do
+    [ -f "$ROOT/$_bin" ] || continue
+    case "$_bin" in
+      *.pdf)  if command -v pdftotext >/dev/null 2>&1; then _txt="$( pdftotext "$ROOT/$_bin" - 2>/dev/null )"
+              else printf 'SKIP: arm 2b — pdftotext absent, %s not extractable here (NOT a pass)\n' "$_bin"; continue; fi ;;
+      *.pptx) if command -v unzip >/dev/null 2>&1; then _txt="$( unzip -p "$ROOT/$_bin" 'ppt/slides/*.xml' 2>/dev/null )"
+              else printf 'SKIP: arm 2b — unzip absent, %s not extractable here (NOT a pass)\n' "$_bin"; continue; fi ;;
+    esac
+    if printf '%s' "$_txt" | grep -q '/Users/\|/home/'; then
+        printf 'FAIL: arm 2b — %s carries an absolute home path in its EXTRACTED text:\n' "$_bin"
+        printf '%s' "$_txt" | grep -oE '(/Users|/home)/[A-Za-z0-9_.-]+' | sort -u | sed 's/^/        /'
+        fail=1
+    else
+        printf 'PASS: arm 2b — %s extracts clean of absolute home paths\n' "$_bin"
+    fi
+done
+# CONTROL: the extraction must be able to SEE a path. Feed it one and require the same grep to fire,
+# so an extraction that silently returns nothing cannot read as agreement.
+if printf 'root "/Users/someone/x"' | grep -q '/Users/\|/home/'; then
+    printf 'PASS: arm 2b mutation control — the extraction grep fires on a planted path\n'
+else
+    printf 'FAIL: arm 2b mutation control is inert — the grep does not fire on a known-bad string\n'
+    fail=1
+fi
+
 # ── arm 3: audit-round coordinates in EMITTED strings and shipped markdown ────────────────────────
 # Source COMMENTS are exempt on purpose: they are internal engineering notes that a user never sees.
 # What a user sees is (a) string literals the binary prints and (b) the markdown that ships. Only

@@ -20,12 +20,6 @@ JavaScript · Java · Ruby · PHP · Lua · Haxe · Bash · C# · JSON · TOML �
 vendored grammars](#languages), and adding another is a vendored tree-sitter grammar plus one row in a
 declarative table.
 
-### See the map — not just the numbers
-
-<p align="center"><img src="docs/assets/colorby-hero.jpg" alt="ripwire --html --color-by=cx: the depth-2 call-graph neighbourhood of lexicalScoresTiered (240 nodes) in this repository, force-directed, nodes on a blue-to-orange complexity scale" width="880"></p>
-
-<p align="center"><sub>One self-contained HTML file (<code>--html[=FILE]</code>), no server, no CDN, click any node to recentre. <code>--color-by=lang|community|cx|churn|tested</code> sets the initial node colour; the page embeds all five and keeps a live selector. Shown here: <code>cx</code> — cyclomatic complexity — over the depth-2 neighbourhood of <code>lexicalScoresTiered</code>, 240 of this repository's own symbols; <code>churn</code> colours the same graph by git history instead. Both share one five-stop blue-to-orange scale rather than the usual green-to-red, so reading it never depends on telling red from green.</sub></p>
-
 ### No API key. No embeddings. No index server. No daemon.
 
 One self-contained binary on your own machine, offline, installed in one line — and the same line
@@ -38,11 +32,14 @@ reading this page:
 
 ```bash
 RIPWIRE_REPO=redhat-et/ripwire bash -c "$(curl -fsSL https://raw.githubusercontent.com/redhat-et/ripwire/main/scripts/install.sh)"
-ripwire . --for="incremental cache invalidation"
+export PATH="$HOME/.local/bin:$PATH"      # where it installed; the installer prints this line if you need it
+cd your-repo
+ripwire . --for="<the change you are about to make, in words>"
 ```
 
 One deterministic, token-budgeted answer: the relevant symbols, their callers, the change risks, and
-the tests that reach them. Run on this repository (2026-08-30), that second line answers in about
+the tests that reach them. The task is yours to phrase — ask about *your* code, not ours. Run on this
+repository (2026-08-30) with `--for="incremental cache invalidation"`, that last line answers in about
 4.3K tokens with:
 
 - **The ranked symbols, in rank order** — the cache-header constant `kCacheMagic` first (with its doc
@@ -55,6 +52,23 @@ the tests that reach them. Run on this repository (2026-08-30), that second line
   `exclConfigHex`; no second query needed to see the neighbourhood.
 - **Its own confidence** — this answer says `confidence="high"` with the score margin attached; a
   flat ranking says `low`, so it reads as a starting point instead of masquerading as an answer.
+  `confidence=` measures how clearly the ranking separates its head from the rest, not whether the
+  head is what you meant: ask a repository about a concept it does not contain and the best lexical
+  matches still rank, confidently. Phrase the task in your code's own words.
+
+### If it works on your codebase, tell us what it got wrong
+
+Every number on this page is a measurement on a corpus we happen to have. **Yours is one we don't.**
+
+After a session on your own repository — your first one counts, and counts most — hand your agent
+[`prompts/improve-for-my-language.md`](prompts/improve-for-my-language.md). It harvests that
+session's own transcript — where ripwire answered, where it missed, where you fell back to grep —
+and every finding it produces has to cite the moment it came from: what you asked, which command
+ran, what came back. Open an issue with the result.
+
+That is worth more to this project than a bug report, because it arrives in the form the project
+already runs on: evidence with its provenance attached, not an impression. Several languages here
+are one contributor's corpus away from being measurably better, and we cannot see your code.
 
 <details>
 <summary>The actual wire format — what your agent reads (minified XML; trimmed and line-wrapped here)</summary>
@@ -94,6 +108,46 @@ top of the real output, which also self-reports the bundle's cost — `est_token
 And against five retrieval competitors on a held-out LocBench slice, it finds **all** gold files in
 the top 10 on **58.3%** of instances — the best alternative lands 40.0% — while indexing in 0.31 s.
 [The full leaderboard, losses included ↓](#graph-ranked-retrieval-it-finds-the-right-files-more-often-than-the-alternatives)
+
+### See the map — not just the numbers
+
+<p align="center"><img src="docs/assets/graph-cx.png" alt="ripwire --html on Django's migration autodetector: 120 symbols, 183 call edges, arrows pointing caller to callee, nodes coloured by cyclomatic complexity on a five-stop scale running deep blue, mid blue, amber, orange, pale yellow, module outlines drawn as translucent regions, and low-confidence call edges drawn with dashed shafts" width="880"></p>
+
+<p align="center"><sub><b>Django's migration autodetector, coloured by complexity.</b> Thresholds are fixed, so the colour means the same thing on every repo you point it at.</sub></p>
+
+```bash
+ripwire path/to/django/db/migrations --rank-by=rrf --top-k=120 --color-by=cx --html=map.html
+```
+
+<table>
+<tr>
+<td width="50%"><img src="docs/assets/graph-lens-cx-churn.png" alt="The same graph twice: above coloured by cyclomatic complexity, below by git commit count. Most nodes sit in a different colour band between the two." width="430"></td>
+<td width="50%"><img src="docs/assets/graph-uncertainty.png" alt="A close crop showing solid and dashed call edges side by side; dashed shafts mark calls the resolver could not pin to a single target" width="430"></td>
+</tr>
+<tr>
+<td><sub><b>The same graph, re-coloured by git churn.</b> 76% of these nodes move to a different band — structure and history disagree, and one run shows you both.</sub></td>
+<td><sub><b>A dashed shaft is a guess.</b> 31 of 183 edges here are one arm of a split the resolver could not choose between. No other tool marks which of its arrows it is unsure about.</sub></td>
+</tr>
+</table>
+
+<details>
+<summary>How to read these pictures — the five lenses, the fixed thresholds, and what the renderer refuses to draw</summary>
+
+One self-contained HTML file (`--html[=FILE]`), no server, no CDN, no external asset. `--color-by=lang|community|cx|churn|tested` sets the initial colour; the page embeds all five and keeps a live selector, so switching lens costs no second run.
+
+Read from the figures above, which state their own rules in a sidecar saved beside each image:
+
+- **arrow points caller → callee** — the graph is directed, and the page draws it that way.
+- **`31 of 183 shafts dashed in this view = the resolver could not choose between same-name definitions and split the call over all of them`** — per *edge*, not per symbol. A symbol-level "this function makes some ambiguous calls" would mark every one of its edges, which would be a lie about most of them.
+- **labels: top 24 by in-view degree, one per name** — one label per distinct name, so a picture of a container class stops crowding out the functions you asked about.
+- **shapes: ● fn ■ cls ✚ var** — kind is nominal data on a nominal channel; complexity never uses shape.
+- **module outlines: `7 of 12 modules with 3+ nodes in view (cap 12; 3 dropped as too thin to read as a region; 2 dropped as enclosing mostly other modules)`** — three separate truncations, each with its own count and its own reason.
+
+The `cx` and `churn` ramps share one five-stop scale, ordered so lightness rises with the value — it survives greyscale printing, and every adjacent pair stays separable under protanopia, deuteranopia and tritanopia. Thresholds are fixed rather than per-corpus quantiles, so a hot node cannot be manufactured by a cold repository.
+
+`churn` needs real git history: a shallow clone reports every file as one commit, and a directory with no repository says `churn unavailable` rather than drawing zeros.
+
+</details>
 
 ### Same answer, a fraction of the tokens — read this table first if your agent is on a budget
 
@@ -189,24 +243,6 @@ indexed but cannot vouch for carries a parse-health row; every file the crawl pa
 itemized with its reason. A confident-looking map that lies by omission is the failure mode this
 tool refuses.
 [What it misses, and what to run next →](#what-it-misses-and-what-to-run-next)
-
-### Saves Tokens: It answers for a fraction of the context
-
-On mid-task questions it had never seen, ripwire answers at **5.0%** of what a grep-and-read pass
-spends — **5.2%** on the questions both arms fully answered. `--pack-signatures` returns **81% fewer
-bytes** than full bodies at top-50. The output is already dense enough that running a dedicated
-context compressor over it saved **exactly 0 tokens**.
-
-Both of those first two figures moved when they were re-derived on 2026-08-23, and they moved in
-**opposite** directions — 7.3% → 5.0% overall, but 1.7% → 5.2% on the both-answered subset. Same
-frozen questions, same frozen verb ladders, same corpus pin, same tokenizer; the naive arm reproduced
-to the token. What changed is where ripwire spends: the compact conceptual route made its *misses*
-much cheaper, while richer default bundles made the questions it *answers* dearer. Both numbers are
-printed because printing only the one that improved would be the failure this project exists to not
-commit. The full per-question re-derivation is in the Round 3 note under [Measured](#measured).
-
-It is also cheap enough to call on reflex: this repository parses in **~0.15 s** cold and **~0.10 s**
-warm (`time ./build/ripwire . --no-cache`), so the agent asks instead of guessing.
 
 ### Graph-Ranked Retrieval: It finds the right files more often than the alternatives
 
@@ -445,6 +481,24 @@ per-lane table and history in [docs/EVALS.md §4](docs/EVALS.md).
 
 </details>
 
+### Saves Tokens: It answers for a fraction of the context
+
+On mid-task questions it had never seen, ripwire answers at **5.0%** of what a grep-and-read pass
+spends — **5.2%** on the questions both arms fully answered. `--pack-signatures` returns **74.7%
+fewer bytes** than full bodies at top-50 (re-derived on this tree, 2026-09-06). The output is already
+dense enough that running a dedicated context compressor over it saved **exactly 0 tokens**.
+
+Both of those first two figures moved when they were re-derived on 2026-08-23, and they moved in
+**opposite** directions — 7.3% → 5.0% overall, but 1.7% → 5.2% on the both-answered subset. Same
+frozen questions, same frozen verb ladders, same corpus pin, same tokenizer; the naive arm reproduced
+to the token. What changed is where ripwire spends: the compact conceptual route made its *misses*
+much cheaper, while richer default bundles made the questions it *answers* dearer. Both numbers are
+printed because printing only the one that improved would be the failure this project exists to not
+commit. The full per-question re-derivation is in the Round 3 note under [Measured](#measured).
+
+It is also cheap enough to call on reflex: this repository parses in **~0.15 s** cold and **~0.10 s**
+warm (`time ./build/ripwire . --no-cache`), so the agent asks instead of guessing.
+
 ### Better Code: It automates the review judgments nobody has time to make — every lens from published research
 
 `--quality-panel` runs the calls a good reviewer makes by hand — is this function too tangled, is it
@@ -541,7 +595,7 @@ Full retrieval tables — including the MRR figures behind the router numbers ab
 </p>
 
 <p align="center">
-  <a href="present/ripwire-showcase.pdf"><b>▶ The whole tool in 27 slides</b></a> — every figure names the instrument that pins it<br>
+  <a href="present/ripwire-showcase.pdf"><b>▶ The whole tool in 29 slides</b></a> — every figure names the instrument that pins it<br>
   <sub>renders in your browser · <a href="present/ripwire-showcase.pptx">pptx</a> beside it · <a href="docs/EVALS.md">the numbers behind it</a></sub>
 </p>
 
@@ -592,15 +646,19 @@ ranking, bodies, callers and tests in one budgeted bundle.
 **Prebuilt binary** — macOS (arm64 / x86-64) and Linux (arm64 / x86-64, built for **RHEL 8+**;
 every release is smoke-tested on a RHEL 9 userland before it publishes). Downloads the latest
 [GitHub Release](https://github.com/redhat-et/ripwire/releases), verifies its SHA-256, and installs
-to `~/.local/bin`. From v0.2.2 the release tarball also ships the seventeen agent skills, and the
+to `~/.local/bin`. From v0.2.2 the release tarball also ships the eighteen agent skills, and the
 installer stages them under `~/.local/share/ripwire/skills` **and activates them for every agent it
-detects** (Claude Code, Codex), printing one line per agent saying what it did. An agent that is not
+detects** (Claude Code, Codex), printing one line per agent saying what it did. Seventeen of the
+eighteen are for using the tool; the one about compiling ripwire itself (`ripwire-opt-remarks`,
+`audience: contributor` in its front matter) stays staged unless you pass `--contributor` to
+`skills/install.sh`. An agent that is not
 installed is never given a skills directory, hooks are never registered without an explicit `--hook`,
 and `RIPWIRE_NO_ACTIVATE=1` stages without activating for image builds. When no agent is detected the
 activation one-liner is printed instead:
 
 ```bash
 RIPWIRE_REPO=redhat-et/ripwire bash -c "$(curl -fsSL https://raw.githubusercontent.com/redhat-et/ripwire/main/scripts/install.sh)"
+export PATH="$HOME/.local/bin:$PATH"      # not on PATH by default on macOS or most Linux shells; add it to your rc file
 ```
 
 **Building it yourself needs CMake 3.24+ and a C++23 compiler, and nothing else installed first** —
@@ -892,10 +950,10 @@ spot:
 $ ripwire . --callers=rankGraphTeleport
 <callers of="rankGraphTeleport" defs="1" count="6" root="." hop_tested="0" hop_untested="6" counts_floor="1">
 <s t="fn" n="runEval" p="src/eval.h:169"/>
-<s t="fn" n="rankGraph" p="src/graph.h:2542"/>
-<s t="fn" n="anchoredLexicalRank" p="src/graph.h:3091"/>
-<s t="fn" n="churnRankedGraph" p="src/main.cpp:983"/>
-<s t="fn" n="runDefaultMap" p="src/main.cpp:1098"/>
+<s t="fn" n="rankGraph" p="src/graph.h:2581"/>
+<s t="fn" n="anchoredLexicalRank" p="src/graph.h:3130"/>
+<s t="fn" n="churnRankedGraph" p="src/main.cpp:986"/>
+<s t="fn" n="runDefaultMap" p="src/main.cpp:1104"/>
 <s t="fn" n="getIndex" p="src/mcpindex.h:1104"/>
 </callers>
 ```
@@ -1389,8 +1447,8 @@ timing-only, and `pmccheck`'s inactive arm now proves that was truly the case.
 ## Standing on the whole field
 
 Almost none of the ideas here are new; the combination and the constraints are. Lessons folded from
-**36 repositories and 67 papers** into one deterministic executable, alongside a labelled
-survey of 231 tools that folded nothing and are catalogued separately — the two sets are disjoint,
+**41 repositories and 67 papers** into one deterministic executable, alongside a labelled
+survey of 237 tools that folded nothing and are catalogued separately — the two sets are disjoint,
 so they add rather than nest. The row-by-row ledger, each with the lesson taken and where it lives, is
 [`docs/LINEAGE.md`](docs/LINEAGE.md). Those three counts are derived from that document's own tables
 by `test/readmedriftcheck.sh`, which fails if this sentence and those tables disagree.
@@ -1516,7 +1574,7 @@ wrong, and it has. These are the results that say so, all in-tree, all published
 
 ### In the tests
 
-`test/regression.sh` names **542 gate scripts** and is the authoritative list;
+`test/regression.sh` names **548 gate scripts** and is the authoritative list;
 `python3 test/pargates.py . ./build/ripwire -j 6` runs the same set in parallel. On top of them sit the
 contracts that do not fit a unit test: two runs byte-identical, warm output identical to cold, output
 that pipes clean through `xmllint --noout`, a sanitizer build with `-fno-sanitize-recover=all`, and a
@@ -1565,13 +1623,13 @@ ripwire wrap aider       # no MCP:   a ranked map file, and the aider invocation
 ripwire wrap --all       # detect every installed agent and emit each one's config
 ```
 
-**One stdio server, 30 verbs** — 15 read, 12 flagship-reflex, 3 span-addressed edit — and a client
+**One stdio server, 31 verbs** — 16 read, 12 flagship-reflex, 3 span-addressed edit — and a client
 that isn't one of the six above can be pointed at the same process by hand.
 
 <details>
-<summary>What the 30 verbs are — lazy body handles, the edit verbs' safety contract, the pre-print skill scan, and the hand-written stanza for any other MCP client</summary>
+<summary>What the 31 verbs are — lazy body handles, the edit verbs' safety contract, the pre-print skill scan, and the hand-written stanza for any other MCP client</summary>
 
-That registers one stdio server — `ripwire --mcp` — exposing **30 verbs**: 15 read verbs, 12
+That registers one stdio server — `ripwire --mcp` — exposing **31 verbs**: 16 read verbs, 12
 flagship-reflex verbs, and 3 span-addressed edit verbs. Read verbs mirror the CLI (`analyze`, `for`,
 `grep`, `cochange`, `fetch_body`, `lego`, `mentions`, `owners`, `memory_recall`,
 `situational_awareness`, `batch`, …); `find_symbol` and `find_referencing_symbols` attach a stable
@@ -1603,7 +1661,7 @@ socket instead of stdio, `ripwire --listen=HOST:PORT` serves the same verbs.
 
 `skills/` ships **eighteen task-shaped skills** that tell an agent *which* verb answers the moment it
 is in — orienting cold, tracing a call, sizing a refactor, checking a diff, hunting a bug, writing
-tests, reviewing security. Without them an agent has 30 verbs and no map of when each applies; the skills name the moment
+tests, reviewing security. Without them an agent has 31 verbs and no map of when each applies; the skills name the moment
 each verb is for. Install as symlinks back into this repo, so edits here take effect
 immediately:
 
@@ -1613,6 +1671,7 @@ skills/install.sh --codex         # → ${AGENTS_HOME:-~/.agents}/skills (canoni
 skills/install.sh --codex --hook  # → also install Codex's task router, CLI nudge + session primer
 skills/install.sh --codex-legacy  # → ${CODEX_HOME:-~/.codex}/skills (older Codex installs)
 skills/install.sh /some/path      # → an explicit destination
+skills/install.sh --contributor   # → also the contributor-facing skill (compiling ripwire itself)
 ripwire --scan-skills=skills      # read the security scanner's verdict first, if you would rather
 ```
 
@@ -1718,7 +1777,7 @@ tier: it parses with its own vendored grammar, so its headings are symbols, not 
 | Orientation for a coding agent working *on* this repository | [`CLAUDE.md`](CLAUDE.md) / [`AGENTS.md`](AGENTS.md) |
 | User-visible capabilities, behaviour changes, known limits | [`CHANGELOG.md`](CHANGELOG.md) |
 | Vendored dependencies and their licences | [`THIRD_PARTY.md`](THIRD_PARTY.md) |
-| The whole tool in 27 slides — the showcase deck | [`present/ripwire-showcase.pdf`](present/ripwire-showcase.pdf) ([pptx](present/ripwire-showcase.pptx), rebuilt by [`present/deck5_ripwire_build.js`](present/deck5_ripwire_build.js)) |
+| The whole tool in 29 slides — the showcase deck | [`present/ripwire-showcase.pdf`](present/ripwire-showcase.pdf) ([pptx](present/ripwire-showcase.pptx), rebuilt by [`present/deck5_ripwire_build.js`](present/deck5_ripwire_build.js)) |
 
 If a document disagrees with `--help`, the document is the bug.
 

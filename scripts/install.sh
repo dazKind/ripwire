@@ -147,10 +147,49 @@ binaryVersion="$( "$extractedDir/ripwire" --version 2>&1 | grep -oE '[0-9]+\.[0-
 }
 
 mkdir -p "$binDir"
-cp "$extractedDir/ripwire" "$binDir/ripwire"
-chmod +x "$binDir/ripwire"
 
-echo "install.sh: installed $binDir/ripwire ($( "$binDir/ripwire" --version 2>&1 || echo "version check failed" ))"
+# INSTALL BY ATOMIC RENAME, NOT BY OVERWRITING IN PLACE.
+#
+# OBSERVED 2026-09-06, upgrading 0.3.8 -> 0.4.0 into /opt/homebrew/bin on macOS 15 (arm64), on the day
+# the first release in 1,051 commits went out. `cp` onto the existing path produced a binary the kernel
+# killed on sight: exit 137 (SIGKILL), no stdout, no stderr, nothing to read. Measured, in this order:
+#
+#   the installed file            exec -> 137, every time, stably
+#   the SAME BYTES at a new path  cp to /tmp, exec -> 0, prints its version
+#   rm + fresh copy, same path    exec -> 0
+#
+# So the bytes were never the problem; reusing the destination inode was. `cp` onto an existing path
+# truncates and rewrites THAT inode. `mv` within one directory is rename(2): the destination becomes the
+# new file's inode atomically, the old one is simply unlinked, and there is never a window where the
+# binary is missing or half-written. This is why package managers install by rename, and it is correct
+# regardless of which kernel behaviour produced the kill.
+#
+# WHAT IS NOT ESTABLISHED, stated because guessing here would be worse than silence: the precise kernel
+# mechanism. Code-signature cache invalidation on an ad-hoc/linker-signed Mach-O is the obvious
+# candidate, and a plausible second is that a running process had the file mapped -- this tool is
+# normally wired into agents as a long-lived `ripwire --mcp` server, and eight were running from that
+# path at the time. Both were tried in controlled repros and NEITHER reproduced, so neither is claimed
+# here. The fix does not depend on the answer; only the explanation would.
+#
+# The temp name lives in $binDir on purpose: a temp file elsewhere makes this a cross-device copy, and
+# `mv` would silently degrade back into the overwrite this exists to avoid.
+installTmp="$binDir/.ripwire.install.$$"
+rm -f "$installTmp"
+cp "$extractedDir/ripwire" "$installTmp"
+chmod +x "$installTmp"
+mv -f "$installTmp" "$binDir/ripwire"
+
+# AND PROVE IT RUNS, FATALLY. This check existed and its failure was swallowed by `|| echo "version
+# check failed"` inside a message that still said "installed" — so the script detected the broken
+# install above, announced success, and exited 0. A report that cannot fail is not a check. If the
+# binary we just placed cannot state its own version, that is an installation failure and the exit
+# status must say so, because the alternative is a user who believes they have a working tool.
+installedVersion="$( "$binDir/ripwire" --version 2>&1 )" || {
+    echo "install.sh: installed $binDir/ripwire but it exits $? without printing a version." >&2
+    echo "  The file is in place and is not usable. Nothing was left half-installed; re-running is safe." >&2
+    exit 1
+}
+echo "install.sh: installed $binDir/ripwire ($installedVersion)"
 
 case ":$PATH:" in
     *":$binDir:"*) ;;

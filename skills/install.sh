@@ -254,10 +254,12 @@ install_codex_hook()
 mode="claude"
 explicitMode=0
 wantHook=0
+wantContributor=0
 explicitPath=""
 for arg in "$@"; do
     case "$arg" in
         --hook) wantHook=1 ;;
+        --contributor) wantContributor=1 ;;
         --codex) mode="codex"; explicitMode=1 ;;
         --codex-legacy) mode="codex-legacy"; explicitMode=1 ;;
         --claude) mode="claude"; explicitMode=1 ;;
@@ -285,6 +287,15 @@ mkdir -p "$dst"
 # otherwise a dangling symlink (e.g. a skill removed in a consolidation) lingers forever and an agent
 # routing to it hits an error and learns to distrust the whole family. `-L` also catches BROKEN symlinks
 # (whose target dir was deleted), which `-e` alone would miss.
+# 2026-09-06 (stranger audit): a skill whose SKILL.md front matter says `audience: contributor` is about
+# working ON ripwire (ripwire-opt-remarks: clang optimization remarks while editing this tree's C++). It is
+# shipped so a contributor can activate it, but it is NOT activated for a user of the tool — the release
+# installer runs this script for every agent it detects on a stranger's machine. Pass --contributor to link
+# those too; without it a previously linked contributor skill is pruned, so a checkout that stops being a
+# contributor setup does not keep one forever.
+is_contributor_skill() { grep -q '^audience: contributor' "$1/SKILL.md" 2>/dev/null; }
+wanted_skill() { [ "$wantContributor" -eq 1 ] || ! is_contributor_skill "$1"; }
+
 pruned=0
 for existing in "$dst"/ripwire-*; do
     [ -e "$existing" ] || [ -L "$existing" ] || continue      # skip the literal glob when nothing matches
@@ -293,12 +304,22 @@ for existing in "$dst"/ripwire-*; do
         rm -f "$existing"
         echo "pruned stale $name (no longer shipped)"
         pruned=$(( pruned + 1 ))
+    elif ! wanted_skill "$src/$name"; then
+        rm -f "$existing"
+        echo "pruned $name (contributor-only; pass --contributor to activate it)"
+        pruned=$(( pruned + 1 ))
     fi
 done
 
 count=0
+skipped=0
 for d in "$src"/ripwire-*/; do
     name="$( basename "$d" )"
+    if ! wanted_skill "$d"; then
+        echo "skipped $name (contributor-only: about working on ripwire itself; pass --contributor to activate it)"
+        skipped=$(( skipped + 1 ))
+        continue
+    fi
     ln -sfn "$d" "$dst/$name"
     echo "installed $name -> $dst/$name"
     count=$(( count + 1 ))
@@ -311,11 +332,11 @@ manifestTmp="$( mktemp "$dst/.ripwire-manifest-v1.tmp.XXXXXX" )"
 {
     echo 'version=1'
     for d in "$src"/ripwire-*/; do
-        echo "skill=$( basename "$d" )"
+        wanted_skill "$d" && echo "skill=$( basename "$d" )"
     done
 } >"$manifestTmp"
 mv "$manifestTmp" "$dst/.ripwire-manifest-v1"
-echo "done. $count ripwire skills active in every session (${pruned} stale pruned) — every ripwire-* above."
+echo "done. $count ripwire skills active in every session (${pruned} pruned, ${skipped} contributor-only skipped) — every ripwire-* installed above."
 
 if [ "$wantHook" -eq 1 ]; then
     case "$mode" in

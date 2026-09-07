@@ -43,10 +43,15 @@ struct Graph
     std::vector<std::uint32_t> outOff;      // N+1 — resolved out-edges (CSR), for <c> children
     std::vector<NodeId>        outTargets;  // callee node ids, deduped, ascending within a source
     std::vector<float>         outVals;     // per-out-edge weight, parallel to outTargets (HITS hub step)
-    std::vector<std::uint8_t>  outProv;     // per-out-edge provenance, parallel to outTargets:
-                                            //   0 = name-based guess (the common case, absent from XML),
-                                            //   1 = PRECISE (a SCIP index pinned this (from,to)) → serialize
-                                            // emits prov="scip". Empty ⇒ no --scip run (all name-based).
+    std::vector<std::uint8_t>  outProv;     // per-out-edge provenance — THE CONFIDENCE AXIS, parallel to outTargets and
+                                            // orthogonal to rank/importance (k=) and to any severity:
+                                            //   0 = name-based, uniquely resolved (the common case, absent from XML),
+                                            //   1 = PRECISE (a SCIP index pinned this (from,to)) → prov="scip",
+                                            //   2 = A4-R5 cross-language FFI binding                → prov="binding",
+                                            //   3 = C1 one arm of a k-way split the resolver could  → prov="split".
+                                            //       not choose between (the per-edge half of ambOut)
+                                            // Empty ⇒ no overlay, no FFI edge and nothing split: every edge uniquely
+                                            // resolved, so the whole attribute is absent (omit-at-confident).
     std::size_t                scipDocsSeen = 0;   // # SCIP documents consumed (0 unless --scip); honesty summary
     std::size_t                scipEdgesPinned = 0;   // # (from,to) edges the SCIP index pinned; honesty summary
     std::vector<std::vector<NodeId>> implementors;   // base-class id → derived class ids (inheritance/Lego view)
@@ -1314,6 +1319,19 @@ inline Graph buildGraph( const IngestResult& ing, const ScipOverlay* scip = null
     std::string              bindKey;       // A4-R5 reused "<fileId>#var" key buffer for the ctypes-handle gate
     HashMap<std::uint64_t, char> bindingEdges;   // A4-R5 (from<<32|to) keys of edges resolved via an FFI alias —
                                                  // consumed below to stamp prov (outProv=2) + the amb honesty mark
+    HashMap<std::uint64_t, char> splitEdges;     // C1: (from<<32|to) keys of edges that are an ARM of a k-way split the
+                                                 // resolver could not choose between — the per-EDGE half of the per-SYMBOL
+                                                 // ambOut counter, consumed below to stamp prov (outProv=3). ambOut says K
+                                                 // of this symbol's CALLS were guesses; this says WHICH EDGES they were,
+                                                 // which the aggregate cannot express and a consumer deciding what to
+                                                 // re-read from source is exactly asking. Filled from the SAME predicate
+                                                 // that increments ambOut, so the two can never disagree.
+                                                 // NOT reserved, deliberately, and the same call bindingEdges above makes:
+                                                 // there is no cheap prior for the split count at declaration time (it is
+                                                 // an OUTPUT of the resolve loop), the map is find-only and never iterated
+                                                 // so its bucket layout cannot reach output, and it is filled inside a loop
+                                                 // whose per-reference tier work dominates the growth cascade by orders of
+                                                 // magnitude. A guessed reserve would be a made-up number in a hot struct.
     std::vector<NodeId>      rule3Out;   // reused Rule-3 output buffer (candidates from the single included file)
     std::string              qkey;       // reused "qualifier::name" buffer for the E#4 canonical lookup (no per-ref alloc)
     std::vector<std::size_t> locShare;   // reused per-candidate sharedLocality memo (computed once per tier, below)
@@ -1990,6 +2008,12 @@ inline Graph buildGraph( const IngestResult& ing, const ScipOverlay* scip = null
         // audit's found silent-pick bug). A call pinned to ONE target — by a qualifier, `this->`, Rule 3's file
         // narrow, or the locality tie-break — is NOT flagged. Low-noise "resolver can't be sure which; read
         // source". This is where canonical resolution SUPPRESSES amb that the old pre-tier count raised.
+        //
+        // C1 (Round C lane B): `splitPick` is set by the SAME predicate, and is read by the edge-emission loop
+        // below to key `splitEdges`. One predicate, two granularities — the per-symbol count and the per-edge
+        // marks are derived from one decision, so the biconditional the gate asserts (a symbol carries amb= iff
+        // at least one of its edges carries prov="split") holds by construction rather than by agreement.
+        bool splitPick = false;
         if( !scipPinned && !bindingPinned )   // a SCIP-pinned call is PRECISE — never an ambiguity clue (that is the whole point).
         {
             std::uint32_t pickTargets = 0;   // non-self tier survivors = EXACTLY the targets the 1/k edge split spans
@@ -2003,12 +2027,13 @@ inline Graph buildGraph( const IngestResult& ing, const ScipOverlay* scip = null
             if( pickTargets > 1 )
             {
                 ++g.ambOut[r.fromSymbol];
+                splitPick = true;
             }
         }
         // A4-R5 provenance (visible today, no serialize change): a cross-language binding edge is resolved via a
         // name-pattern binding table, not direct name resolution — so it carries the existing amb= "verify in
         // source" honesty mark (and feeds the header `ambiguous=N`). Conservative: an FFI edge is NEVER a silent
-        // confident edge. The precise prov="binding" label rides outProv=2 below (pending the serialize one-liner).
+        // confident edge. The precise prov="binding" label rides outProv=2 below (serialize.h emits it).
         if( bindingPinned )
         {
             ++g.ambOut[r.fromSymbol];
@@ -2075,6 +2100,10 @@ inline Graph buildGraph( const IngestResult& ing, const ScipOverlay* scip = null
             EdgeAcc& e = acc[ ekey ];
             e.confSum += base;
             e.nref    += 1;
+            if( splitPick )
+            {
+                splitEdges[ekey] = 1;   // C1: remember (from,to) for prov="split" — every arm of the split, never a subset
+            }
             if( bindingPinned )
             {
                 bindingEdges[ekey] = 1; // A4-R5: remember (from,to) for prov="binding"
@@ -2110,10 +2139,12 @@ inline Graph buildGraph( const IngestResult& ing, const ScipOverlay* scip = null
     }
     g.outTargets.resize( edges.size() );
     g.outVals.resize( edges.size() );
-    // provenance: allocate outProv ONLY when an overlay was supplied OR an A4-R5 binding edge exists —
-    // the common run keeps it EMPTY so serialize emits no prov= (zero token cost, byte-identical to before).
-    //   1 = PRECISE (SCIP-pinned) → prov="scip";  2 = A4-R5 cross-language FFI binding → prov="binding".
-    if( scip || !bindingEdges.empty() )
+    // provenance: allocate outProv ONLY when an overlay was supplied OR an A4-R5 binding edge exists OR the
+    // resolver had to split at least one call — a corpus that resolves cleanly keeps it EMPTY so serialize
+    // emits no prov= at all (zero token cost, byte-identical to before; test/golden.xml is the standing proof).
+    //   1 = PRECISE (SCIP-pinned) → prov="scip";  2 = A4-R5 cross-language FFI binding → prov="binding";
+    //   3 = C1 one arm of a k-way split the resolver could not choose between → prov="split".
+    if( scip || !bindingEdges.empty() || !splitEdges.empty() )
     {
         g.outProv.assign( edges.size(), 0u );
     }
@@ -2132,6 +2163,14 @@ inline Graph buildGraph( const IngestResult& ing, const ScipOverlay* scip = null
             else if( !bindingEdges.empty() && bindingEdges.find( ( std::uint64_t( e.from ) << 32 ) | e.to ) != bindingEdges.end() )
             {
                 g.outProv[ pos ] = 2u;                                             // (from,to) an FFI binding edge
+            }
+            // C1 precedence, and it is deliberate: scip PINS an edge (precise), binding NAMES the mechanism that
+            // resolved it (and already carries its own amb= mark), split says the resolver could not choose. A
+            // binding edge that is also a split keeps the more specific label; prov= is single-valued, and the
+            // symbol's amb= counts it either way, so nothing is lost by the ordering.
+            else if( !splitEdges.empty() && splitEdges.find( ( std::uint64_t( e.from ) << 32 ) | e.to ) != splitEdges.end() )
+            {
+                g.outProv[ pos ] = 3u;                                             // (from,to) one arm of a k-way split
             }
         }
     }
@@ -4592,10 +4631,26 @@ inline std::vector<char> testSymbolForwardReach( const IngestResult& ing, const 
 // pairwise distances are all ∞ within R form separate groups (§2.5) — singleton groups are the emitter's
 // <unconnected> block; the output ALWAYS contains every terminal (honest partitions, never a silent empty).
 //
+// §2.4a — WHICH of several equally-short joins. prev[] used to be the FIRST-discovered parent, and discovery
+// order is out-edges then in-edges, each ascending by node id — an id assigned in crawl order, which is
+// sorted by PATH. So among equally-short joins the reported one was decided by file name, and the answer to
+// "how do these two symbols relate?" came back as `empty`, `push_back`, `size` (see connectJoinBreadth
+// below for the measured population). The relaxation now runs on ties: a candidate parent at the SAME
+// distance replaces the incumbent iff ( connects, id ) is smaller — informativeness first, id still the
+// total final tie-break. Distance is untouched, so path length, node count and edge count are untouched:
+// this changes WHICH equally-short answer is returned and nothing else about the answer's shape. It does
+// NOT reach a hub at distance 2 that beats a meaningful join at distance 3; no tie-break can, and none is
+// claimed. Prim's (dist, minId, maxId) rule over terminal PAIRS is deliberately unchanged — the defect is a
+// parent choice, and on a 2-terminal --connect Prim has no choice to make at all.
+//
 // Determinism (§3, byte-identical by construction): BFS visits out-edges first then in-edges, each ascending
-// by id (both CSRs are id-sorted), so prev[] is the first-discovered = lexicographically-smallest-by-id equal-
-// length path; Prim ties break on (dist, minId, maxId); every emitted list is id-/(from,to)-sorted; truncation
-// drops from a sorted order. Pure integer BFS/MST — no float, no clock, no I/O; exact, not tolerance-banded.
+// by id (both CSRs are id-sorted); on a tie prev[] resolves by the (connects, id) minimum over EVERY parent
+// at the minimal distance — and because BFS expands in non-decreasing distance order, every such parent is
+// offered exactly once, so the winner is a minimum over a total order and cannot depend on expansion order
+// (the rule REMOVES an order dependence rather than adding one; prev[] chains still descend strictly in
+// distance, so they stay acyclic). Prim ties break on (dist, minId, maxId); every emitted list is
+// id-/(from,to)-sorted; truncation drops from a sorted order. Pure integer BFS/MST — no float, no clock, no
+// I/O; exact, not tolerance-banded.
 //
 // Complexity (§6): T bounded BFS = O( T·(V+E) ) worst case over the two existing CSRs — T is capped at
 // kMaxTerminals = 16 and R at kMaxRadius = 12, so in practice the radius-bounded frontier touches far less
@@ -4611,6 +4666,64 @@ namespace connectcfg
     inline constexpr std::uint32_t kMaxRadius     = 12;
     inline constexpr std::uint32_t kDefaultRadius = 6;
     inline constexpr std::uint16_t kUnreachable   = 0xFFFFu;   // BFS "not reached within R" sentinel
+}
+
+// ---- §2.4a how much a join EXPLAINS: the IDF of the Steiner search --------------------------------------
+// `connects(v)` = the number of DISTINCT symbols v joins in the UNDIRECTED view this search actually walks —
+// its callers PLUS its callees, both O(1) off the two CSRs the graph already carries. It is not fan-in
+// alone, because the search is not directed: a dispatcher that CALLS five hundred things joins any two of
+// them exactly as vacuously as a leaf five hundred things call.
+//
+// Why the number matters. A join node that connects everything connects nothing. `empty` carries 764 callers
+// in this repository, so "both call something named `empty`" is not a relationship between two symbols, it
+// is a coincidence of the STL — and --connect reported exactly that, because equal-distance alternatives
+// were resolved by node id, which is assigned in crawl order, which is sorted by path. Measured over an
+// 869-pair population of this repo's own call graph, 186 of the 201 wrong joins (92.5%) were an STL or hub
+// name. docs/EVALS.md, "--connect's equal-distance join", registers the mechanism and the PAIRED band this
+// is measured against (the population instrument belongs to the round that commissioned it, not to this file).
+inline std::uint32_t connectJoinBreadth( const Graph& g, NodeId v ) noexcept
+{
+    const std::size_t N = g.wOutDeg.size();
+    if( v >= N )
+    {
+        return 0;
+    }
+    std::uint32_t breadth = g.outOff[ v + 1 ] - g.outOff[ v ];
+    if( g.inEdges.rows() == N )                      // the same degrade condition the BFS below uses for haveIn
+    {
+        const auto* ro = g.inEdges.rowOffsets();
+        breadth += ro[ v + 1 ] - ro[ v ];
+    }
+    return breadth;
+}
+
+// The HUB FLOOR, derived rather than fitted. A node with `connects` neighbours manufactures C(connects,2)
+// derived symbol-pair relationships on its own; the graph ASSERTS `edges` of them. So the floor is the
+// smallest D whose derived count exceeds the whole graph's asserted count — D(D-1)/2 > edges — the degree at
+// which one node alone joins more distinct pairs than there are call edges to join anything with.
+// Closed-form integer bisection over one number the map header already prints: no histogram, no sort, no
+// float, and no constant fitted to make a population look good (this project rejects those on sight). It
+// self-scales as sqrt(2E), which is exactly why the round that commissioned it registered a PAIRED band —
+// the repository IS the corpus, so a rebase moves the floor and an absolute level would be meaningless.
+// 186 here at symbols=13909 edges=17144. A graph so dense that even D=65535 does not clear it returns 65535,
+// a floor nothing reaches: no row is labelled, which is the honest degrade rather than a wrong label.
+inline std::uint32_t connectHubFloor( const Graph& g ) noexcept
+{
+    const std::uint64_t edges = std::uint64_t( g.outTargets.size() );
+    std::uint32_t       lo = 2, hi = 0xFFFFu;        // pairs(65535) ~ 2.1e9, past any edge count this tool indexes
+    while( lo < hi )                                 // smallest D with D(D-1)/2 > edges (monotone in D)
+    {
+        const std::uint32_t mid = lo + ( hi - lo ) / 2;
+        if( std::uint64_t( mid ) * ( mid - 1 ) / 2 > edges )
+        {
+            hi = mid;
+        }
+        else
+        {
+            lo = mid + 1;
+        }
+    }
+    return lo;
 }
 
 // one reported call edge — ALWAYS true caller→callee direction, whichever way the undirected search walked it.
@@ -4677,6 +4790,19 @@ inline ConnectResult connectSubgraph( const Graph& g, const std::vector<NodeId>&
     std::vector<std::vector<std::uint16_t>> dist( T );
     std::vector<std::vector<NodeId>>        prev( T );
     std::vector<std::vector<std::uint8_t>>  prevViaOut( T );
+
+    // §2.4a: at EQUAL distance, the parent that connects FEWER things wins; the node id is still the total
+    // final tie-break, so the result stays byte-identical run to run. See the header comment above and
+    // connectJoinBreadth for why this is the right question to ask of a join node.
+    const auto moreInformative = [ & ]( NodeId cand, NodeId cur ) noexcept -> bool
+    {
+        if( cur == kNoNode )
+        {
+            return true;   // defensive: only the BFS source has no parent, and its dist is 0 (never a tie)
+        }
+        const std::uint32_t bCand = connectJoinBreadth( g, cand ), bCur = connectJoinBreadth( g, cur );
+        return bCand != bCur ? bCand < bCur : cand < cur;
+    };
     {
         std::vector<NodeId> q;
         q.reserve( 256 );
@@ -4689,6 +4815,32 @@ inline ConnectResult connectSubgraph( const Graph& g, const std::vector<NodeId>&
             dist[ti][ src ] = 0;
             q.clear();
             q.push_back( src );
+
+            // ONE relaxation step, shared by the out-CSR and in-CSR halves — they differ ONLY in the
+            // discovery channel they record. The two halves used to be the same four lines twice, and
+            // §2.4a's tie-break would have made them the same EIGHT lines twice: a rule with a comparison
+            // in it, written down twice, is how the two halves silently drift apart (this file's own
+            // shortestPath/shortestPathAny fold is the precedent, and --quality-delta flagged that one).
+            // `viaOut` is the CSR truth recorded at the moment of discovery: 1 = u CALLS v, 0 = v CALLS u.
+            const auto relax = [ & ]( NodeId u, std::uint16_t du, NodeId v, std::uint8_t viaOut )
+            {
+                if( v >= N )
+                {
+                    return;
+                }
+                if( dist[ti][v] == connectcfg::kUnreachable )
+                {
+                    dist[ti][v] = std::uint16_t( du + 1 );  prev[ti][v] = u;  prevViaOut[ti][v] = viaOut;
+                    q.push_back( v );
+                    return;
+                }
+                // §2.4a: an EQUAL-distance alternative parent — take it iff it explains more.
+                if( dist[ti][v] == du + 1 && moreInformative( u, prev[ti][v] ) )
+                {
+                    prev[ti][v] = u;  prevViaOut[ti][v] = viaOut;
+                }
+            };
+
             for( std::size_t head = 0; head < q.size(); ++head )
             {
                 const NodeId        u  = q[ head ];
@@ -4701,26 +4853,14 @@ inline ConnectResult connectSubgraph( const Graph& g, const std::vector<NodeId>&
                 // out-edges first (ascending by construction — buildGraph stores targets ascending per source)
                 for( std::uint32_t k = g.outOff[u]; k < g.outOff[u + 1]; ++k )
                 {
-                    const NodeId v = g.outTargets[ k ];
-                    if( v >= N || dist[ti][v] != connectcfg::kUnreachable )
-                    {
-                        continue;
-                    }
-                    dist[ti][v] = std::uint16_t( du + 1 );  prev[ti][v] = u;  prevViaOut[ti][v] = 1u;
-                    q.push_back( v );
+                    relax( u, du, g.outTargets[ k ], 1u );
                 }
                 // then in-edges (row u's callers, ascending — the in-CSR fill preserves (from,to) sort order)
                 if( haveIn )
                 {
                     for( std::uint32_t k = inRo[u]; k < inRo[u + 1]; ++k )
                     {
-                        const NodeId v = inCi[ k ];
-                        if( v >= N || dist[ti][v] != connectcfg::kUnreachable )
-                        {
-                            continue;
-                        }
-                        dist[ti][v] = std::uint16_t( du + 1 );  prev[ti][v] = u;  prevViaOut[ti][v] = 0u;
-                        q.push_back( v );
+                        relax( u, du, inCi[ k ], 0u );
                     }
                 }
             }

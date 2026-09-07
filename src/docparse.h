@@ -489,6 +489,7 @@ inline std::string parseDocFile( const std::string& path, std::string_view extLo
             if( !detail::readWholeFile( path, bytes ) )
             {
                 DEGRADED_PATH_ALERT( "docparse: cannot read document file" );
+                std::fprintf( stderr, "ripwire: doc %s: cannot read — omitted from the index (the skipped verb counts it as unmeasured)\n", path.c_str() );   // 2026-09-06
                 return {};
             }
             switch( docKindOf( extLower ) )

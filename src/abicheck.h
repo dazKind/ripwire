@@ -944,7 +944,7 @@ inline void writeAbiCheck( std::FILE* out, const AbiResult& res, std::size_t max
                        "the authorship anchor is per PATH, so a branch changing struct S in one file while "
                        "the live line changes S's mirror in another is a merge hazard only layout(S) on the "
                        "merged result can see. Single-root; read-only (cat-file/diff/merge-base only). at= is the git "
-                       "commit these numbers were computed at; a trailing +dirty means the working tree differed from "
+                       "commit these numbers were computed at; a trailing +shallow means the clone's history is truncated (a depth-limited clone: churn counts only the commits present), and a trailing +dirty means the working tree differed from "
                        "that commit (head= is the same commit, bare sha, kept for compatibility). -->" );
     // M10: head= stays a bare 9-hex sha (gitstampcheck.sh's existing arm pins that spelling); at= is the new
     // attribute, carrying the dirty bit this document never disclosed before.

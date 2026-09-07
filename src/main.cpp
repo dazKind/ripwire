@@ -768,8 +768,11 @@ std::optional<int> runNotes( const MainDispatch& d )
         std::string date = rw::quality::gitCommitterDateIso( d.root );
         if( date.empty() )
         {
-            DEGRADED_PATH_ALERT( "notes: non-git root — dating the note at the fixed epoch 1970-01-01 for determinism" );
-            date = "1970-01-01";
+            // 2026-09-06 stranger audit: this used to store 1970-01-01 — an epoch nobody explained, read as a
+            // real date by every consumer. "undated" is the honest value: there is no committer date to anchor to.
+            DEGRADED_PATH_ALERT( "notes: non-git root — the note is stored undated" );
+            date = "undated";
+            std::fprintf( stderr, "ripwire: --note-add: %s is not a git checkout — the note is stored undated (d=\"undated\"; a git checkout stamps the committer date)\n", d.root.c_str() );
         }
         // provenance stamp (the day's costliest lesson): anchor the note to the commit it was written under.
         // gitHeadSha resolves empty exactly when date's own gitCommitterDateIso lookup would have (same
@@ -841,7 +844,7 @@ std::optional<int> runNotes( const MainDispatch& d )
             char hdr[ 512 ];
             std::snprintf( hdr, sizeof( hdr ),
                            "<ctx><!-- ripwire field notes: notes=%zu targets=%zu dangling=%zu (a target with no matching indexed symbol/file — legal: listed here, surfaced nowhere)."
-                           " Each note row: d= is the ISO date it was recorded; sha= the abbreviated commit and branch= the branch checked out at record time,"
+                           " Each note row: d= is the ISO date it was recorded (\"undated\" when the root was not a git checkout at record time); sha= the abbreviated commit and branch= the branch checked out at record time,"
                            " both omitted entirely on a note stored before provenance stamping (absent means none recorded, never empty) -->",
                            all.size(), targetCount, danglingCount );
             w.write( hdr );
@@ -1006,7 +1009,7 @@ inline ChurnRanking churnRankedGraph( const MainDispatch& d )
         }
         rw::RankedGraph    ranked = isDecay ? rankGraphTeleport( d.g, churnDecayTeleportWorkspace( rootDirs, d.ing, &hasChurnEvidence ) )
                                             : rankGraphTeleport( d.g, churnTeleportWorkspace( rootDirs, d.ing, "18 months ago", &hasChurnEvidence ) );
-        std::string        window = churnWindowStamp( isDecay ? churnDecayWindowLabel( "all-history" ) : std::string( "18mo" ), hasChurnEvidence );
+        std::string        window = churnWindowStamp( isDecay ? churnDecayWindowLabel( "all-history" ) : rw::defaultWindowLabel( d.root, "18mo" ), hasChurnEvidence );
         discloseEmptyChurn( window );
         return { std::move( ranked.rank ), std::move( window ), { ranked.iterationCount, ranked.hasConverged, true } };
     }
@@ -1022,7 +1025,10 @@ inline ChurnRanking churnRankedGraph( const MainDispatch& d )
         return { std::move( ranked.rank ), std::move( window ), { ranked.iterationCount, ranked.hasConverged, true } };
     }
     rw::RankedGraph    ranked = rankGraphTeleport( d.g, churnTeleport( d.root, d.ing, "18 months ago", d.cfg.since.empty() ? nullptr : &sinceScope, &hasChurnEvidence ) );
-    std::string        window = churnWindowStamp( isScoped ? std::string_view( d.cfg.since ) : std::string_view( "18mo" ), hasChurnEvidence );
+    // F1: the DEFAULT window's stamp names the anchor that produced it ("18mo@HEAD"); an ACTIVE --since is
+    // the user's own value and is stamped verbatim, exactly as before.
+    const std::string  defaultWindow = rw::defaultWindowLabel( d.root, "18mo" );
+    std::string        window = churnWindowStamp( isScoped ? std::string_view( d.cfg.since ) : std::string_view( defaultWindow ), hasChurnEvidence );
     discloseEmptyChurn( window );
     return { std::move( ranked.rank ), std::move( window ), { ranked.iterationCount, ranked.hasConverged, true } };
 }
@@ -1126,7 +1132,7 @@ int runDefaultMap( const MainDispatch& d )
     std::string        queryRouteNote;   // leading routed comment for --query (empty under --no-route)
     std::size_t        mapDiffChanged = 0;      // D6: teleport-seed file count, only meaningful when mapDiffActive
     bool               mapDiffActive  = false;  // true only under --map-diff — gates the header's changed= attribute
-    std::string        churnWindowLabel = "18mo";   // §A9.6: churn's window label; an ACTIVE --since overrides it below
+    std::string        churnWindowLabel = rw::defaultWindowLabel( root, "18mo" );   // §A9.6: churn's window label (F1: "@HEAD" when anchored); an ACTIVE --since overrides it below
     if( !cfg.query.empty() )
     {
         // --query: PURE lexical (BM25) relevance. eval-at-scale showed fusing PageRank importance
@@ -1453,7 +1459,12 @@ int runDefaultMap( const MainDispatch& d )
         // posture; no evidence ⇒ the page's CHURN_OK legend note discloses instead of lying zeros.
         std::vector<std::uint32_t> htmlChurn( ing.files.size(), 0 );
         const rw::SinceScope       htmlScope;   // inactive: --html has no --since form
-        const bool htmlChurnOk = mineChurnPerFile( ing, root, multiRoot, ws, std::string_view(), htmlScope, "18 months ago", htmlChurn );
+        // ONE spelling of the window, mined with it and then printed by the page's churn legend. It used to
+        // be a bare literal here and the legend said only "0 1-2 3-9 10-29 30+" — five buckets of an unnamed
+        // unit over an unstated horizon, which reads as "commits ever". Naming a constant and passing it is
+        // what keeps the page from making a claim the run cannot back.
+        static constexpr const char* kHtmlChurnWindow = "18 months ago";
+        const bool htmlChurnOk = mineChurnPerFile( ing, root, multiRoot, ws, std::string_view(), htmlScope, kHtmlChurnWindow, htmlChurn );
 
         // tested for the --color-by=tested lens: QMetrics is computed upstream only under
         // --metrics/--for/--exemplar, so on a bare --html run testedPtr is null and every node would
@@ -1479,7 +1490,14 @@ int runDefaultMap( const MainDispatch& d )
                 return 1;
             }
         }
-        writeHtml( htmlOut, ing, rank, g, mapTopK, HtmlColorExtras{ testedPtr, &htmlChurn, htmlChurnOk, cfg.colorBy }, mapRootArg );   // R-R
+        // 2026-09-06 stranger audit: the page names what it maps (last path segment only — the path itself never
+        // reaches the page), anchors to the commit like every XML root does, and says which binary drew it.
+        HtmlColorExtras       htmlColor{ testedPtr, &htmlChurn, htmlChurnOk, cfg.colorBy, kHtmlChurnWindow, cfg.rankBy };
+        const HtmlProvenance  htmlProv = htmlProvenanceFor( root, multiRoot );
+        htmlColor.atStamp  = htmlProv.atStamp;
+        htmlColor.rootName = htmlProv.rootName;
+        htmlColor.version  = kRipwireVersion;
+        writeHtml( htmlOut, ing, rank, g, mapTopK, htmlColor, mapRootArg );   // R-R
         if( htmlOut != stdout )
         {
             std::fclose( htmlOut );
@@ -2277,8 +2295,77 @@ bool isBareMapRun( const rw::Config& c )
 //                (identifiers and signatures are never redacted, by design): on the bare map there is nothing
 //                to un-redact, so the refusal names a body-serving verb.
 //   --refetch    re-clones a git-URL root and reaches nothing on a local path.
+//   --html       H1 (2026-09-06): writeHtml() is called from ONE place — runDefaultMap — and every
+//                navigation/report verb pre-empts the default map in the dispatch chain below, so
+//                `--around=SYM --html=F` exited 0, wrote no file, and said nothing. See kHtmlRideAlong.
+
+// H1 — the flags --html composes WITH, beyond kMapShapingFlags.
+//
+// THE DEFECT. `ripwire <dir> --around=writeHtml --html=/tmp/h.html` exited 0 and wrote nothing; the same
+// argv without --around wrote 59 KB. Same for --callers/--impact/--for/--lint/--hotspots, and a derived
+// sweep of the whole flag universe (test/htmlhostcheck.sh) found 74 flag x --html combinations in that
+// state. The MIRROR of this guard already existed and was loud: `--color-by` without `--html` refuses and
+// names --html (cli.h validateModifierGuards). This is the other half.
+//
+// REFUSE, NOT HONOUR — the decision, and why. Honouring would mean rendering the verb's scoped node set as
+// the page, and that is a worse answer than it sounds: the page's three views are an overview of Louvain
+// MODULES, a module subgraph, and a depth-bounded EGO GRAPH, all computed client-side over the whole
+// selected map. Over a 20-node --around slice the module overview is empty and the ego graph is a
+// re-derivation of the slice itself, so `--around=X --html=F` would produce a page answering a different
+// question from the one --around answers, with no tell. The page ALREADY does what that caller wants, and
+// now does it by name: `#node/X/2` is the depth-2 neighbourhood of X, so the refusal has somewhere real to
+// point. Refusing is also the smaller change (one predicate, no new emit path) and it is the one that
+// satisfies non-negotiable #3 — a caller can tell a no-op from a typo.
+//
+// DERIVED, NOT ENUMERATED. The 74 verbs are not listed here. firstFlagOutside() walks kBoolFlags/kViewFlags
+// — the rows parseArgs itself matched — so the refusal is "anything that is not on the compose list",
+// which makes a verb added tomorrow refuse tomorrow with nobody editing anything. Every previous closure of
+// this family in this repo was done by enumerating members and re-opened on the member nobody enumerated
+// (jsonUnsupportedVerb's 77-arm chain missed 12; the shaping-flag guards missed 18). The residual risk runs
+// the OTHER way — a new MAP-SHAPING flag would refuse until it is added below — and that direction is the
+// safe one: a loud refusal on a legal combination is noticed the first time it happens, a silent drop is
+// not. test/htmlhostcheck.sh arm (B) pins the compose list from the behaviour side.
+//
+// The list itself: kMapShapingFlags (a bare --json run IS the default map and these shape it) plus --html's
+// own two spellings, --query (the dispatch chain hoists it straight into runDefaultMap), the map's
+// body-serving riders that append blocks to the same map (--expand/--outline/--pack-signatures), and the
+// crawl/ordering shapers. Verified against the sweep: every one of these still WRITES the page.
+inline constexpr std::string_view kHtmlRideAlong[] =
+{
+    "--html", "--query", "--expand", "--outline", "--pack-signatures", "--exclude",
+    "--most-important-last", "--no-auto-order", "--no-post-check", "--route", "--stable",
+};
+
+// the verb that answered instead of the default map, or empty when --html is honoured on this run
+std::string_view htmlPreemptedBy( const rw::Config& c )
+{
+    if( !c.html )
+    {
+        return {};
+    }
+    // The hand-written parseArgs residue the flag tables cannot see, named explicitly — the same honest cost
+    // jsonUnsupportedVerb pays at its own top, and the same member isBareMapRun already spells out. --export
+    // writes a compile_commands-style JSON and returns before the map; without this line it was the ONE flag
+    // the derived sweep still found silent after the walk closed the other 73.
+    if( c.exportCcJson )
+    {
+        return "--export=cc.json";
+    }
+    return firstFlagOutside( c, kMapShapingFlags, kHtmlRideAlong );
+}
+
 std::optional<int> refuseInertMainModifiers( const rw::Config& cfg )
 {
+    if( const std::string_view verb = htmlPreemptedBy( cfg ); !verb.empty() )
+    {
+        // The pointer is phrased so it reads correctly for a verb with no symbol (--lint, --export) as well as
+        // for one with (--around=SYM): it names the page's own route rather than assuming the argv had a name.
+        std::fprintf( stderr, "ripwire: --html renders the DEFAULT map as a self-contained graph page, and %.*s answers instead — nothing was written. "
+                              "Pass --html on its own (e.g. ripwire <dir> --html=g.html); a single symbol's neighbourhood is a ROUTE INTO that page, "
+                              "g.html#node/SYM/2, not a second verb beside it\n",
+                      int( verb.size() ), verb.data() );
+        return 1;
+    }
     if( cfg.noRedact && isBareMapRun( cfg ) )
     {
         std::fprintf( stderr, "ripwire: --no-redact serves bodies VERBATIM and the default map carries no bodies (identifiers and signatures are never "
@@ -2540,6 +2627,42 @@ std::optional<int> runCliEdit( const rw::Config& cfg )
 // payload byte untouched), and written to the real stdout. Exit codes pass through unchanged. A run that
 // produced no XML root (a refusal already happened, or a text verb slipped past validateLegendModifier's
 // list) is refused here naming the flag — never served as if the posture had applied.
+// 2026-09-06 stranger audit: a root that exists but cannot be opened (chmod 000, another user's checkout) came
+// back as an EMPTY map at exit 0 — indistinguishable from "no source here". Probe the directory the way the
+// crawl will; refuse with the reason instead of serving nothing. A non-directory root is left to the crawl.
+static bool rootIsReadable( const std::string& resolvedRoot )
+{
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    if( !fs::is_directory( fs::path( resolvedRoot ), ec ) || ec )
+    {
+        return true;
+    }
+    fs::directory_iterator probe( fs::path( resolvedRoot ), ec );
+    if( !ec )
+    {
+        return true;
+    }
+    std::fprintf( stderr, "ripwire: root path cannot be read: %s (%s) — fix its permissions, or point at a directory you can open\n",
+                  resolvedRoot.c_str(), ec.message().c_str() );
+    return false;
+}
+
+// 2026-09-06 stranger audit: --cache=<a directory> read as "corrupt", wrote nothing, and served a byte-identical
+// map at exit 0 — the fixed --cache=<nonexistent dir> bug's twin. The flag names a FILE; say so, with the form.
+static bool cachePathIsDirectory( const std::string& cachePath )
+{
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    if( !fs::is_directory( fs::path( cachePath ), ec ) || ec )
+    {
+        return false;
+    }
+    std::fprintf( stderr, "ripwire: --cache=%s: that is a directory; --cache names the blob FILE to read and write, e.g. --cache=%s/ripwire.bin\n",
+                  cachePath.c_str(), cachePath.c_str() );
+    return true;
+}
+
 static int dispatchMain( const rw::Config& cfg, char** argv );
 
 // the key for a SHARED root (`r` = the map family, `ctx` = the bundle family), from the flags that shaped it
@@ -3233,6 +3356,10 @@ static int dispatchMain( const rw::Config& cfg, char** argv )
                 }
                 return 1;
             }
+            if( !rootIsReadable( resolvedRoot ) )
+            {
+                return 1;   // the refusal is on stderr (rootIsReadable)
+            }
         }
         resolvedRoots.push_back( resolvedRoot );
     }
@@ -3331,6 +3458,10 @@ static int dispatchMain( const rw::Config& cfg, char** argv )
         // The file need not EXIST — a cold first run is the normal case — but the directory that would hold
         // it must, or the write at the end of the run silently does nothing.
         const fs::path    cacheDir = fs::path( cachePath ).parent_path();
+        if( cachePathIsDirectory( cachePath ) )
+        {
+            return 1;   // the refusal is on stderr (cachePathIsDirectory)
+        }
         if( !cacheDir.empty() && !fs::is_directory( cacheDir, cacheEc ) )
         {
             std::fprintf( stderr, "ripwire: --cache=%s: the directory '%s' does not exist, so nothing could ever be written there "

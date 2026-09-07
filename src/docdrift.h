@@ -278,6 +278,7 @@ struct DriftResult
                                                   //   path ascending. Independent of docs/cleanDocs: disclosure,
                                                   //   not a verdict, so it must not move the clean= count.
     std::uint32_t       docsScanned = 0;
+    std::uint32_t       docsUnread  = 0;        // 2026-09-06: indexed docs whose read failed at scan time — omitted from docs=, disclosed as docs_unread=
     std::uint32_t       cleanDocs   = 0;
     std::uint32_t       anchors     = 0;
     std::uint32_t       checked     = 0;
@@ -2334,6 +2335,8 @@ inline DriftResult computeDocDrift( const IngestResult& ing, const std::string& 
         if( !scan.isDocRead[d] )
         {
             DEGRADED_PATH_ALERT( "doc-drift: cannot read a markdown file — its anchors are omitted" );
+            ++res.docsUnread;   // 2026-09-06: the doc used to vanish from docs= with no trace a Release binary keeps
+            std::fprintf( stderr, "ripwire: doc-drift: cannot read %s — its anchors are omitted (docs_unread= counts it)\n", scan.docRel[d].c_str() );
             continue;
         }
         for( const Anchor& a : scan.perDoc[d] )
@@ -2618,6 +2621,8 @@ inline constexpr const char* kDocDriftLegend =
     // on two measured runs: this walk's own 4 MiB read ceiling is INDEPENDENT of the crawl's
     // --max-file-size, so `--max-file-size=100M` on a tree with one 4.8 MB source file indexes 3 files
     // and scans a corpus of 2. It is its own population, not a relation to files=.
+    "docs_unread=, when present, is the count of indexed documents this scan could NOT read (permissions, a "
+    "race with a writer) — they are not in docs= and their anchors were not checked; absent means none. "
     "FOUR COUNTERS on this element name four DIFFERENT populations, stated here because one of them "
     "openly disagrees with a number the map reports elsewhere. docs= is the DOCUMENTS scanned for "
     "anchors (markdown by extension, after any filter); it is the denominator of the doc rows below. "
@@ -2703,6 +2708,10 @@ inline void writeDocDriftPage( std::FILE* out, const DriftResult& res, std::size
     std::fputs( "-->", out );
     std::fprintf( out, "<doc-drift docs=\"%u\" clean=\"%u\" anchors=\"%u\" checked=\"%u\" unchecked=\"%u\" drift=\"%u\" dated=\"%u\" prose=\"%u\" corpus=\"%zu\"",
                   res.docsScanned, res.cleanDocs, res.anchors, res.checked, unchecked, res.drift, res.dated, res.prose, res.corpusFiles );
+    if( res.docsUnread > 0 )
+    {
+        std::fprintf( out, " docs_unread=\"%u\"", res.docsUnread );   // absent means every indexed doc was read
+    }
     if( !res.filter.empty() )
     {
         std::fprintf( out, " filter=\"%s\"", ex( res.filter ).c_str() );

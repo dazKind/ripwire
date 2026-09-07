@@ -90,6 +90,53 @@ inline void subtokens( std::string_view id, std::vector<std::string>& out )
 // has real, non-incidental lexical grounding somewhere in the corpus.
 inline constexpr float kWeakLexicalScoreThreshold = 1.0f;
 
+// ─── BM25 PARAMETERS — the ONE definition every scoring site in this file reads (A4 unification) ──────
+// k1 (term-frequency saturation) and b (length normalization) used to be declared TWICE — once in
+// lexicalScoresTiered, once in lexicalScoresNameExactTiered — as separate `constexpr double k1 = 1.5, b =
+// 0.75;` lines that had to be kept in sync by hand. The early-termination bound in lexicalScoresTiered's
+// pruned branch (bm25ImpactBound below) derived its cap from ITS OWN local copy, which is the trap: change
+// k1 or b at one site without also updating the bound and MaxScore pruning starts discarding candidates
+// whose true score exceeds the now-stale cap — no crash, no error, just a quietly worse top-K. Both
+// scoring sites and the bound now read the SAME resolved (k1,b), so they cannot drift apart again.
+// test/bm25boundcheck.sh asserts the bound stays a genuine upper bound for whatever this resolves to.
+//
+// RIPWIRE_BM25_K1 / RIPWIRE_BM25_B override the shipped defaults, clamped to a range that keeps BM25 in a
+// sane regime (k1 <= 0 collapses term-frequency saturation to a step function; b outside [0,1] inverts or
+// overshoots length normalization) — the RIPWIRE_PATHTOK_W / RIPWIRE_BASENAME_W precedent a few hundred
+// lines below, calibration sweeps ONLY (bench/bm25_sweep.py). A nonzero-from-default value shipping as the
+// new default requires the sweep's own pre-registered acceptance verdict (docs/EVALS.md); this commit
+// changes neither shipped value.
+struct Bm25Params
+{
+    double k1;
+    double b;
+};
+
+inline constexpr Bm25Params kBm25Default{ 1.5, 0.75 };
+
+inline Bm25Params resolveBm25Params() noexcept
+{
+    Bm25Params p = kBm25Default;
+    if( const char* k1Env = std::getenv( "RIPWIRE_BM25_K1" ) )
+    {
+        p.k1 = std::clamp( std::atof( k1Env ), 0.1, 10.0 );
+    }
+    if( const char* bEnv = std::getenv( "RIPWIRE_BM25_B" ) )
+    {
+        p.b = std::clamp( std::atof( bEnv ), 0.0, 1.0 );
+    }
+    return p;
+}
+
+// The provably-safe per-term impact bound (MaxScore "max contribution"), derived from the SAME (k1,b) the
+// exact scoring loop uses. idf: this term's IDF. T: the largest weighted tf of this term anywhere in the
+// corpus (tfMaxOf[u] at the call site). See lexicalScoresTiered's pruned branch for the full monotonicity
+// proof this bound relies on — it holds for ANY k1 > 0 and ANY b in [0,1], not just the shipped defaults.
+inline double bm25ImpactBound( double idf, double T, const Bm25Params& p ) noexcept
+{
+    return idf * ( T * ( p.k1 + 1.0 ) ) / ( T + p.k1 * ( 1.0 - p.b ) ) * ( 1.0 + 1e-9 );
+}
+
 // BM25 score of `query` against each symbol's doc (name subtokens + callees' names + DOC-COMMENT & BODY
 // text). Returns a per-symbol score vector (size = symbols.size()). Cold path: one query.
 //
@@ -338,10 +385,46 @@ inline std::vector<float> lexicalScoresTiered( const IngestResult& ing, const st
         scanTextInto( tfFlat.data() + docIndex * matchCount, dl[ docIndex ], text, w );
     };
 
+    // ── SIRA term margin (docs/EVALS.md "Corpus-statistics term margin", PRE-REGISTERED 2026-09-05) ──
+    // Arming only. The decision itself needs corpus statistics that do not exist until after pass 2, so
+    // it lives below the fold; all that happens here is the extra field statistic the decision reads.
+    // marginBits is the k of "a term separates iff idf_u >= k * ln 2", k = 1 being the shipped rule and
+    // the only rung this round may ship (the ladder is frozen in the registration). Disarmed, every
+    // branch this flag guards is skipped and the scorer is the historical one byte-for-byte.
+    const int  marginBits  = []
+    {
+        const char* env = std::getenv( "RIPWIRE_TERMMARGIN" );
+        if( env == nullptr || *env == '0' )
+        {
+            return 0;
+        }
+        const char* bitsEnv = std::getenv( "RIPWIRE_TERMMARGIN_BITS" );
+        return bitsEnv != nullptr ? std::clamp( std::atoi( bitsEnv ), 1, 8 ) : 1;
+    }();
+    const bool marginArmed = marginBits > 0;
+
+    // nameDf[m] = symbols whose NAME FIELD ALONE carries match-table row m. This is the statistic the
+    // LB-1 negative is the reason for: that round's IDF floor read document frequency only, and so
+    // deleted `module` — the truth's OWN name carrier — on a corpus where `module` is everywhere in
+    // bodies. A term that names between 1 and S/2 symbols separates on the field ripwire weights
+    // highest (×3) whatever its body mass says, and is kept. Measured HERE, inside pass 1, because
+    // this is the only point at which the name field's contribution is separable from the callee, doc,
+    // body, path and basename fields that follow — and because pass 1 runs before the pass-2 branch
+    // split, so the scan and persisted-stats paths read the identical integers.
+    std::vector<int> nameDf( marginArmed ? matchCount : 0, 0 );
+
     // pass 1 — name (×kwName) + callee-name (×kwCallee) fields need no file text
     for( std::size_t i = 0; i < S; ++i )
     {
         scanField( i, ing.symbols[i].name, kwName );
+        if( marginArmed )
+        {
+            const int* const nameRow = tfFlat.data() + i * matchCount;   // name field only: nothing else has run
+            for( std::size_t m = 0; m < matchCount; ++m )
+            {
+                nameDf[m] += nameRow[m] > 0 ? 1 : 0;
+            }
+        }
         for( std::uint32_t e = outOff[i]; e < outOff[i + 1]; ++e )
         {
             scanField( i, ing.symbols[ outTargets[e] ].name, kwCallee );
@@ -719,6 +802,119 @@ inline std::vector<float> lexicalScoresTiered( const IngestResult& ing, const st
             }
         }
         tfFlat = std::move( tfFolded );
+        if( marginArmed )
+        {
+            // fold nameDf the SAME way tf just folded, so the margin test below sees one row per unique
+            // token on either arm. A doc carrying both the exact token and an admitted variant in its
+            // name is counted twice, so a folded nameDf is a CEILING, not a count — stated rather than
+            // hidden. It matters only when RIPWIRE_QSTEM is also armed, which ships off.
+            for( std::size_t v = 0; v < variantCount; ++v )
+            {
+                if( dfVariant[v] <= variantCap )
+                {
+                    nameDf[ matchToks[ uniqueCount + v ].u ] += nameDf[ uniqueCount + v ];
+                }
+            }
+        }
+    }
+
+    // ── SIRA term margin — the decision (docs/EVALS.md, PRE-REGISTERED 2026-09-05) ────────────────────
+    // A query term earns its contribution by SEPARATING the target from corpus-level confusers, not by
+    // looking relevant. BM25's own idf says when that stops being true: at df = S/2,
+    // idf = ln( (S-n+0.5)/(n+0.5) + 1 ) is exactly ln 2 — one bit, the point at which observing the term
+    // halves the candidate space. Above it the term carries less than a bit and hands its tf mass to
+    // whichever document recites it most, which on a natural-language query ("how does the csrf token
+    // get validated") is the prose, not the answer. This ranker has no query-side stopword list, and a
+    // corpus-statistics margin test is that idea derived from the tree in front of it rather than
+    // written down in English — a Rust corpus's `mut` and a Python corpus's `self` are caught by the
+    // same arithmetic that catches `the`, with nothing language-specific anywhere.
+    //
+    // TWO FIELDS, because ONE field is how the LB-1 negative happened. That round's IDF floor read
+    // document frequency alone and deleted `module` — the truth's own name carrier — flipping a hit to
+    // a miss (docs/EVALS.md §7). A term that names between 1 and S/2 symbols separates on the field
+    // this scorer weights highest, whatever its body mass says, so `separatesName` keeps it. A term
+    // naming NOTHING has no name margin to appeal to; a term naming MORE than half the corpus has no
+    // margin there either.
+    //
+    // THE SOLE-ANCHOR GUARD, and the trap inside it. Suppression is skipped entirely unless a PRESENT,
+    // non-suppressed term survives it — otherwise a query whose every term is corpus-saturating scores
+    // zero everywhere, which is the catastrophic shape, not a ranking. "Present" is load-bearing and is
+    // the subtle half: an ABSENT term (df = 0) has the LARGEST idf in the whole scheme,
+    // ln( (S+0.5)/0.5 + 1 ), so an implementation that asks "did a higher-idf term survive?" without
+    // excluding absent terms reads a typo beside the anchor as excellent evidence and drops the anchor.
+    // Gated: test/termmargincheck.sh arms (b), (c) and (d), each red before this code existed.
+    //
+    // KEPT OR DROPPED, never fractionally weighted. A kept term's contribution is the historical
+    // expression evaluated in the historical order — bit-identical, not merely close — and a dropped
+    // term's impact cap is 0, so the MaxScore bound stays a valid bound and the pruned and exhaustive
+    // branches stay byte-identical to each other. `dl` is untouched: a suppressed term's EVIDENCE
+    // vanishes, the document's length does not, exactly the posture the R3 variant guard already takes.
+    std::vector<char> termKept( uniqueCount, 1 );
+    if( marginArmed )
+    {
+        // df in fixed doc order over the folded rows — the same integers both pass-2 branches produced
+        std::vector<int> dfMargin( uniqueCount, 0 );
+        for( std::size_t i = 0; i < S; ++i )
+        {
+            const int* const tfRow = tfFlat.data() + i * uniqueCount;
+            for( std::size_t u = 0; u < uniqueCount; ++u )
+            {
+                dfMargin[u] += tfRow[u] > 0 ? 1 : 0;
+            }
+        }
+        // "separates" at k bits: idf_u >= k*ln2  ⇔  (S-n+0.5)/(n+0.5) + 1 >= 2^k  ⇔  n <= (S+0.5)/2^k - 0.5,
+        // which at k = 1 is exactly n <= S/2. Evaluated in doubles from integer inputs, so it is a pure
+        // function of (S, n, k) and cannot vary run to run.
+        const double separationCut = ( double( S ) + 0.5 ) / std::exp2( double( marginBits ) ) - 0.5;
+        std::vector<char> suppressible( uniqueCount, 0 );
+        std::size_t       presentCount = 0, survivorCount = 0;
+        for( std::size_t u = 0; u < uniqueCount; ++u )
+        {
+            if( dfMargin[u] == 0 )
+            {
+                continue;                                          // absent: contributes nothing, survives nothing
+            }
+            ++presentCount;
+            const bool separatesDoc  = double( dfMargin[u] ) <= separationCut;
+            const bool separatesName = nameDf[u] > 0 && double( nameDf[u] ) <= separationCut;
+            suppressible[u]          = ( !separatesDoc && !separatesName ) ? 1 : 0;
+            survivorCount += suppressible[u] == 0 ? 1 : 0;
+        }
+        const bool applySuppression = survivorCount > 0;            // the sole-anchor guard
+        for( std::size_t u = 0; u < uniqueCount; ++u )
+        {
+            termKept[u] = ( applySuppression && suppressible[u] != 0 ) ? 0 : 1;
+        }
+        if( std::getenv( "RIPWIRE_TERMMARGIN_DEBUG" ) != nullptr )
+        {
+            for( std::size_t u = 0; u < uniqueCount; ++u )
+            {
+                const char* verdict = "absent";
+                if( dfMargin[u] > 0 )
+                {
+                    if( termKept[u] == 0 )
+                    {
+                        verdict = "SUPPRESSED";
+                    }
+                    else if( !applySuppression && suppressible[u] != 0 )
+                    {
+                        verdict = "kept (sole-anchor)";
+                    }
+                    else if( double( dfMargin[u] ) <= separationCut )
+                    {
+                        verdict = "kept (doc-separates)";
+                    }
+                    else
+                    {
+                        verdict = "kept (name-separates)";
+                    }
+                }
+                std::fprintf( stderr, "term-margin: \"%s\" df=%d/%zu nameDf=%d bits=%d %s\n",
+                              uniqueToks[u].c_str(), dfMargin[u], S, nameDf[u], marginBits, verdict );
+            }
+            std::fprintf( stderr, "term-margin: %zu present, %zu survive, suppression %s\n",
+                          presentCount, survivorCount, applySuppression ? "applied" : "withheld (sole-anchor)" );
+        }
     }
 
     // corpus stats — avgdl accumulates in the SAME doc order as before (identical doubles); dfreq[u] =
@@ -730,7 +926,8 @@ inline std::vector<float> lexicalScoresTiered( const IngestResult& ing, const st
     }
     avgdl /= double( S ? S : 1 );
 
-    constexpr double   k1 = 1.5, b = 0.75;
+    const Bm25Params    bm25Params = resolveBm25Params();       // A4: the ONE definition — see above
+    const double        k1 = bm25Params.k1, b = bm25Params.b;
     std::vector<float> score( S, 0.f );
 
     // ── H2 (B0 round 2): MaxScore-style safe pruning — only when the caller opted in AND the env
@@ -787,14 +984,15 @@ inline std::vector<float> lexicalScoresTiered( const IngestResult& ing, const st
             }
             for( std::size_t u = 0; u < uniqueCount; ++u )
             {
-                if( dfreq[u] == 0 )
+                if( dfreq[u] == 0 || termKept[u] == 0 )
                 {
-                    continue; // never contributes anywhere
+                    continue; // never contributes anywhere — a suppressed term's cap stays 0, and a cap of
+                              // 0 bounds a contribution of 0, so the MaxScore proof below is unchanged
                 }
                 const int    n    = dfreq[u];
                 const double idf  = std::log( ( double( S ) - n + 0.5 ) / ( n + 0.5 ) + 1.0 );
                 const double T    = double( tfMaxOf[u] );
-                const double cap1 = idf * ( T * ( k1 + 1.0 ) ) / ( T + k1 * ( 1.0 - b ) ) * ( 1.0 + 1e-9 );
+                const double cap1 = bm25ImpactBound( idf, T, bm25Params );          // A4: shared bound, same (k1,b)
                 capOcc[u]         = cap1 * double( occCount[u] );
             }
         }
@@ -831,9 +1029,9 @@ inline std::vector<float> lexicalScoresTiered( const IngestResult& ing, const st
             {
                 const std::size_t u  = uniqueIndexOfQtok[qi];
                 const int         tf = tfRow[u];
-                if( tf == 0 )
+                if( tf == 0 || termKept[u] == 0 )
                 {
-                    continue;
+                    continue; // termKept is all-1 disarmed, so this reads as the historical `tf == 0`
                 }
                 const int    n   = dfreq[u];
                 const double idf = std::log( ( double( S ) - n + 0.5 ) / ( n + 0.5 ) + 1.0 );
@@ -888,9 +1086,9 @@ inline std::vector<float> lexicalScoresTiered( const IngestResult& ing, const st
         {
             const std::size_t u  = uniqueIndexOfQtok[qi];
             const int         tf = tfFlat[ i * uniqueCount + u ];
-            if( tf == 0 )
+            if( tf == 0 || termKept[u] == 0 )
             {
-                continue; // old: docs[i].find( qt ) == end
+                continue; // old: docs[i].find( qt ) == end — termKept is all-1 disarmed, so this is that
             }
             const int    n   = dfreq[u];
             const double idf = std::log( ( double( S ) - n + 0.5 ) / ( n + 0.5 ) + 1.0 );
@@ -930,7 +1128,8 @@ inline std::vector<float> lexicalScores( const IngestResult& ing, const std::vec
 // not every builder and every graph. This variant scores the query — tokenized on WHITESPACE only, NOT
 // subtokenized — against each symbol's document = its WHOLE lowercased name (one token; and its
 // container::name as a second whole token when a scope exists, so "graph::buildgraph" can also match).
-// Same BM25 constants (k1=1.5, b=0.75) and the same Section down-weight as lexicalScores. bench/
+// Same BM25 parameters (resolveBm25Params(), the ONE definition above) and the same Section down-weight as
+// lexicalScores — literally the same declaration since A4's unification, not just the same values. bench/
 // ANSWERQUALITY.md's co-change table shows whole-name BM25 wins at deeper k — but that is a SEED-based
 // finding, so this ships only behind --route (experimental) until query-time evidence justifies it.
 //
@@ -1049,7 +1248,8 @@ inline std::vector<float> lexicalScoresNameExactTiered( const IngestResult& ing,
         }
     }
 
-    constexpr double   k1 = 1.5, b = 0.75;
+    const Bm25Params    bm25Params = resolveBm25Params();        // A4: the ONE definition — see above
+    const double        k1 = bm25Params.k1, b = bm25Params.b;
     std::vector<float> score( S, 0.f );
     for( std::size_t i = 0; i < S; ++i )
     {

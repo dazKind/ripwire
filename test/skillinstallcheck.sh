@@ -20,13 +20,37 @@ no(){ echo "  FAIL  $1"; fail=1; }
 TMP="$( mktemp -d )"; trap 'rm -rf "$TMP"' EXIT
 DST="$TMP/skills"
 
-# ---- 1) install.sh deploys EVERY shipped skill (the deployment-drift catch) ----
-shipped=$( ls -d "$SK"/ripwire-*/ 2>/dev/null | wc -l | tr -d ' ' )
+# ---- 1) install.sh deploys EVERY user-facing shipped skill (the deployment-drift catch) ----
+# 2026-09-06 (stranger audit): a skill whose SKILL.md front matter says `audience: contributor` is about
+# working ON ripwire and is shipped but NOT activated for a user of the tool (the release installer runs
+# this script on every stranger's machine). `shipped` below is therefore the USER-FACING set; the
+# contributor set is asserted separately in (1b)/(1c): absent by default, present with --contributor.
+shippedAll=$( ls -d "$SK"/ripwire-*/ 2>/dev/null | wc -l | tr -d ' ' )
+contributorSkills=$( grep -l '^audience: contributor' "$SK"/ripwire-*/SKILL.md 2>/dev/null | wc -l | tr -d ' ' )
+shipped=$(( shippedAll - contributorSkills ))
 bash "$SK/install.sh" "$DST" >/dev/null 2>&1
 live=0; for l in "$DST"/ripwire-*; do [ -e "$l" ] && live=$(( live + 1 )); done
 { [ "$shipped" -gt 0 ] && [ "$live" -eq "$shipped" ]; } \
-    && ok "install.sh deploys all $shipped shipped skills (live=$live)" \
-    || no "install.sh deployed $live of $shipped shipped skills (drift: shipped but not installed)"
+    && ok "install.sh deploys all $shipped user-facing shipped skills (live=$live; $contributorSkills contributor-only held back)" \
+    || no "install.sh deployed $live of $shipped user-facing shipped skills (drift: shipped but not installed)"
+[ "$contributorSkills" -ge 1 ] \
+    && ok "(1b) at least one shipped skill is marked audience: contributor (ripwire-opt-remarks) — the arm below measures something" \
+    || no "(1b) no shipped skill carries audience: contributor — the contributor arms measure nothing"
+[ ! -e "$DST/ripwire-opt-remarks" ] && [ ! -L "$DST/ripwire-opt-remarks" ] \
+    && ok "(1b) the contributor-only skill is NOT activated by default" \
+    || no "(1b) ripwire-opt-remarks was activated for a plain user install"
+grep -q 'skill=ripwire-opt-remarks' "$DST/.ripwire-manifest-v1" 2>/dev/null \
+    && no "(1b) the manifest declares the contributor-only skill that was not linked (manifest parity broken)" \
+    || ok "(1b) the manifest declares exactly the linked set (no contributor-only entry)"
+CONTRIB="$TMP/skills-contrib"
+bash "$SK/install.sh" --contributor "$CONTRIB" >/dev/null 2>&1
+[ -e "$CONTRIB/ripwire-opt-remarks" ] \
+    && ok "(1c) --contributor activates the contributor-only skill too ($shippedAll linked)" \
+    || no "(1c) --contributor did not activate ripwire-opt-remarks"
+bash "$SK/install.sh" "$CONTRIB" >/dev/null 2>&1
+[ ! -e "$CONTRIB/ripwire-opt-remarks" ] && [ ! -L "$CONTRIB/ripwire-opt-remarks" ] \
+    && ok "(1c) a re-run without --contributor prunes the contributor-only link (a setup that stops being one does not keep it)" \
+    || no "(1c) the contributor-only link survived a re-run without --contributor"
 
 # ---- 2) PRUNE removes a stale/dangling skill (the deleted-skill catch) ----
 ln -sfn "$SK/ripwire-does-not-exist/" "$DST/ripwire-ghost"     # a dangling symlink (deleted skill)

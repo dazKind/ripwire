@@ -620,7 +620,9 @@ namespace mcpedit
     // noise). The cache-dir path is a deterministic pure function of the target path, so two ripwire processes
     // editing the SAME file still open the SAME lock file and flock still serializes them cross-process (the F1
     // guarantee is preserved) — it just never lands in the repo tree. Locks have their own sharded subtree:
-    // cache eviction never scans or removes a possibly-live advisory-lock inode.
+    // the blob eviction never enters it. Since 2026-09-06 quality.h's sweepStaleEditLocks does, and reclaims a
+    // lock that is older than a day AND not held (flock LOCK_NB succeeding is the liveness test) — one machine
+    // had 45,765 of these before that; a possibly-live (held, or fresh) lock inode is still never removed.
     inline std::string editLockPath( const std::string& targetPath )
     {
         std::uint64_t h = 1469598103934665603ULL;      // FNV-1a-64 of the target path → a stable per-file lock name
